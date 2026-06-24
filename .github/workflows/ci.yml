@@ -10,7 +10,7 @@ jobs:
   terraform:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: opentofu/setup-opentofu@v1
         with:
           tofu_version: 1.12.1
@@ -28,7 +28,7 @@ jobs:
   python-and-shell:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: compile python
         run: python3 -m compileall -q apps bench data
       - name: shell syntax
