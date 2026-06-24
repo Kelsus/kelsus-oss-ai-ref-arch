@@ -28,7 +28,7 @@ locals {
 # ---------------------------------------------------------------------------
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
-  version = "~> 5.13"
+  version = "~> 6.6"
 
   name = "${var.cluster_name}-vpc"
   cidr = var.vpc_cidr
@@ -76,7 +76,7 @@ resource "aws_security_group" "vpce" {
 
 module "vpc_endpoints" {
   source  = "terraform-aws-modules/vpc/aws//modules/vpc-endpoints"
-  version = "~> 5.13"
+  version = "~> 6.6"
 
   vpc_id             = module.vpc.vpc_id
   security_group_ids = var.enable_nat_gateway ? [] : [aws_security_group.vpce[0].id]
