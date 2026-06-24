@@ -106,7 +106,7 @@ module "vpc_endpoints" {
 # ---------------------------------------------------------------------------
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
-  version = "~> 20.24"
+  version = "~> 21.23"
 
   cluster_name    = var.cluster_name
   cluster_version = var.cluster_version
@@ -204,7 +204,7 @@ resource "aws_route_table_association" "gpu_capacity" {
 # ---------------------------------------------------------------------------
 module "karpenter" {
   source  = "terraform-aws-modules/eks/aws//modules/karpenter"
-  version = "~> 20.24"
+  version = "~> 21.23"
 
   cluster_name = module.eks.cluster_name
 
