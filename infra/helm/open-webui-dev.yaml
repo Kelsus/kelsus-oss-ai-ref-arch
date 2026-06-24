@@ -1,0 +1,82 @@
+# Open WebUI — a browser chat UI pointed at the in-cluster vLLM endpoint.
+# Runs on a CPU (system) node; talks to vLLM over the internal ClusterIP
+# service. Reached from your laptop via `make webui` (a local port-forward).
+# Dev convenience: auth disabled, ephemeral storage, telemetry off.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: open-webui
+  namespace: default
+  labels:
+    app: open-webui
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: open-webui
+  template:
+    metadata:
+      labels:
+        app: open-webui
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: open-webui
+          image: ghcr.io/open-webui/open-webui:main
+          ports:
+            - containerPort: 8080
+          env:
+            # Point it at vLLM's OpenAI-compatible API (internal service DNS).
+            - name: OPENAI_API_BASE_URL
+              value: http://vllm.default.svc.cluster.local:8000/v1
+            - name: OPENAI_API_KEY
+              value: "sk-dummy"          # vLLM doesn't require a key
+            - name: ENABLE_OLLAMA_API
+              value: "false"
+            # Dev convenience: no login wall.
+            - name: WEBUI_AUTH
+              value: "false"
+            - name: WEBUI_NAME
+              value: "Kelsus Sovereign AI (dev)"
+            # Sovereign posture: no phone-home telemetry.
+            - name: ANONYMIZED_TELEMETRY
+              value: "false"
+            - name: DO_NOT_TRACK
+              value: "true"
+            - name: SCARF_NO_ANALYTICS
+              value: "true"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 1Gi
+            limits:
+              memory: 2Gi
+          volumeMounts:
+            - name: data
+              mountPath: /app/backend/data
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 60     # image is large; allow time to pull + init
+      volumes:
+        - name: data
+          emptyDir: {}                # dev: chat history is ephemeral
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: open-webui
+  namespace: default
+spec:
+  selector:
+    app: open-webui
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP   # internal only; reach via local port-forward

@@ -1,0 +1,13 @@
+{
+  "model": "run_20260612T154252Z",
+  "accuracy_pct": 0.0,
+  "ci_pct": [
+    0.0,
+    65.8
+  ],
+  "n": 2,
+  "judge": {
+    "url": "http://127.0.0.1:8000/v1",
+    "model": "local"
+  }
+}

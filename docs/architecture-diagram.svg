@@ -1,0 +1,71 @@
+<svg viewBox="0 0 1000 498" width="1000" height="498" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="ra-title ra-desc" font-family="'Space Grotesk','Inter',sans-serif">
+  <title id="ra-title">Sovereign LLM/RAG reference architecture — layered</title>
+  <desc id="ra-desc">A layered architecture inside the customer's AWS VPC, drawn as a pyramid of six layers, each naming the services it contains. Top to bottom: Interface (OpenAI-compatible API, FastAPI gateway, Open WebUI); Guardrails and evaluation (PII redaction, grounding and citation checks, eval harness); Applications (claims and invoice intake, sovereign document Q&amp;A); Model serving (vLLM open-weight LLM on GPU, TEI embeddings and reranker on CPU); Data and retrieval (S3, Postgres with pgvector, in-VPC parsing); and Platform (EKS, Karpenter, Terraform, Helm). Security and Observability are shown as columns that wrap every layer. The only egress is a one-time, build-time pull of model weights into in-account S3.</desc>
+  <defs>
+    <style>
+      .lt{font-weight:600;font-size:14px;fill:#16181a}
+      .lt.k{fill:#142a6e}
+      .ls{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;fill:#5b6166}
+      .pt{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;letter-spacing:.1em;fill:#16181a;font-weight:600}
+      .pi{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:9.5px;fill:#5b6166}
+      .cap{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:8.5px;fill:#a6adb4}
+      .vpc{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;letter-spacing:.1em;fill:#2342a8}
+      .foot{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;fill:#8a9197}
+      .layer{fill:#ffffff;stroke:#d3d8dd;stroke-width:1.4}
+      .layer.k{fill:#eaeef8;stroke:#2342a8;stroke-width:1.6}
+      .panel{fill:#f6f7f8;stroke:#e3e6e8;stroke-width:1.2}
+    </style>
+  </defs>
+
+  <!-- VPC boundary -->
+  <rect x="10" y="10" width="980" height="472" rx="16" fill="#ffffff" stroke="#2342a8" stroke-width="1.4" stroke-dasharray="2 6"/>
+  <rect x="30" y="26" width="13" height="13" rx="3.5" fill="none" stroke="#2342a8" stroke-width="2"/>
+  <text class="vpc" x="52" y="36">CUSTOMER AWS ACCOUNT · VPC · NO THIRD-PARTY EGRESS</text>
+
+  <!-- Cross-cutting columns wrapping the pyramid -->
+  <rect class="panel" x="28" y="66" width="130" height="376" rx="9"/>
+  <text class="pt" x="93" y="92" text-anchor="middle">SECURITY</text>
+  <text class="pi" x="93" y="132" text-anchor="middle">IAM</text>
+  <text class="pi" x="93" y="164" text-anchor="middle">IRSA / Pod Identity</text>
+  <text class="pi" x="93" y="196" text-anchor="middle">KMS · CMK</text>
+  <text class="pi" x="93" y="228" text-anchor="middle">Private subnets</text>
+  <text class="pi" x="93" y="260" text-anchor="middle">VPC endpoints</text>
+  <text class="cap" x="93" y="424" text-anchor="middle">wraps every layer</text>
+
+  <rect class="panel" x="842" y="66" width="130" height="376" rx="9"/>
+  <text class="pt" x="907" y="92" text-anchor="middle">OBSERVABILITY</text>
+  <text class="pi" x="907" y="132" text-anchor="middle">Prometheus</text>
+  <text class="pi" x="907" y="164" text-anchor="middle">Grafana</text>
+  <text class="pi" x="907" y="196" text-anchor="middle">CloudWatch</text>
+  <text class="pi" x="907" y="240" text-anchor="middle">GPU dead-man's</text>
+  <text class="pi" x="907" y="256" text-anchor="middle">switch → 0</text>
+  <text class="cap" x="907" y="424" text-anchor="middle">wraps every layer</text>
+
+  <!-- Pyramid of layers (apex = user-facing, base = platform) -->
+  <rect class="layer" x="265" y="66" width="470" height="56" rx="9"/>
+  <text class="lt" x="283" y="90">Interface</text>
+  <text class="ls" x="283" y="109">OpenAI-compatible API · FastAPI gateway · Open WebUI</text>
+
+  <rect class="layer" x="251" y="130" width="498" height="56" rx="9"/>
+  <text class="lt" x="269" y="154">Guardrails &amp; evaluation</text>
+  <text class="ls" x="269" y="173">PII redaction · grounding &amp; citation checks · eval harness</text>
+
+  <rect class="layer" x="237" y="194" width="526" height="56" rx="9"/>
+  <text class="lt" x="255" y="218">Applications</text>
+  <text class="ls" x="255" y="237">Claims &amp; invoice intake · Sovereign document Q&amp;A (RAG)</text>
+
+  <rect class="layer k" x="223" y="258" width="554" height="56" rx="9"/>
+  <text class="lt k" x="241" y="282">Model serving</text>
+  <text class="ls" x="241" y="301">vLLM — open-weight LLM (GPU) · TEI embeddings &amp; reranker (CPU)</text>
+
+  <rect class="layer" x="209" y="322" width="582" height="56" rx="9"/>
+  <text class="lt" x="227" y="346">Data &amp; retrieval</text>
+  <text class="ls" x="227" y="365">S3 documents &amp; weights · Postgres + pgvector · in-VPC parsing</text>
+
+  <rect class="layer" x="195" y="386" width="610" height="56" rx="9"/>
+  <text class="lt" x="213" y="410">Platform</text>
+  <text class="ls" x="213" y="429">EKS · Karpenter GPU NodePools (g6e / p4d / p5) · Terraform · Helm</text>
+
+  <!-- Footnote -->
+  <text class="foot" x="10" y="468">The only egress is a one-time, build-time pull of open-weight model weights into in-account S3 — never on the serving path.</text>
+</svg>

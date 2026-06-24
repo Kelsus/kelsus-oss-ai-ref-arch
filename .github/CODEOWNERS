@@ -1,0 +1,16 @@
+# Code-review gate (SOC2 CC8 change management). A PR touching a covered path
+# requires review from the in-scope maintainers team before it can merge (enforced
+# by branch protection + require_code_owner_reviews — see .github/branch-protection.sh).
+#
+# IMPORTANT: create the team and add ONLY the in-scope engineers. That membership
+# IS the access-wall control (SOC2 CC6) that keeps the rest of Kelsus out:
+#   gh api -X PUT orgs/Kelsus/teams/refarch-maintainers/repos/Kelsus/kelsus-oss-ai-ref-arch \
+#     -f permission=maintain
+# Prefer individuals? Replace the team handle with @usernames.
+
+*                       @Kelsus/refarch-maintainers
+
+# Security-sensitive areas, called out so changes here always need maintainer review.
+/infra/                 @Kelsus/refarch-maintainers
+/.github/               @Kelsus/refarch-maintainers
+/apps/gateway/          @Kelsus/refarch-maintainers

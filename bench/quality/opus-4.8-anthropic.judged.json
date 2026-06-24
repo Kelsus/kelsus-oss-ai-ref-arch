@@ -1,0 +1,13 @@
+{
+  "model": "opus-4.8-anthropic",
+  "accuracy_pct": 32.8,
+  "ci_pct": [
+    27.3,
+    38.8
+  ],
+  "n": 250,
+  "judge": {
+    "url": "http://127.0.0.1:8000/v1",
+    "model": "local"
+  }
+}

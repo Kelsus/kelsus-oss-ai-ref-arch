@@ -1,0 +1,13 @@
+{
+  "model": "llama4-scout",
+  "accuracy_pct": 25.2,
+  "ci_pct": [
+    20.2,
+    30.9
+  ],
+  "n": 250,
+  "judge": {
+    "url": "http://127.0.0.1:8000/v1",
+    "model": "local"
+  }
+}

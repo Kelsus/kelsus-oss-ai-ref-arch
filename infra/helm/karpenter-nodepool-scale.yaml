@@ -1,0 +1,42 @@
+# Scale-tier GPU capacity: g6e.12xlarge (4x L40S, 192GB) for TP=4 serving of
+# 70B-class models. Applied on demand for benchmark runs; Karpenter provisions
+# when a 4-GPU pod appears and consolidates the node away when it empties.
+# Reuses the shared EC2NodeClass "gpu". Apply: kubectl apply -f <this file>
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpu-scale
+spec:
+  template:
+    metadata:
+      labels:
+        workload: inference
+        tier: scale
+        nvidia.com/gpu.present: "true"
+    spec:
+      taints:
+        - key: nvidia.com/gpu
+          value: "true"
+          effect: NoSchedule
+      requirements:
+        # spot + on-demand: Karpenter tries the cheaper spot pools first, and
+        # spot often has capacity when on-demand ICEs (and vice versa). For
+        # benchmark batches interruption is tolerable — and this is the same
+        # pattern the H100 sweep uses by decision.
+        - { key: karpenter.sh/capacity-type, operator: In, values: [spot, on-demand] }
+        - { key: node.kubernetes.io/instance-type, operator: In, values: [g6e.12xlarge, g6e.24xlarge] }
+        - { key: kubernetes.io/arch, operator: In, values: [amd64] }
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: gpu
+      expireAfter: 720h
+  # Cap ≈ one benchmark box. NOTE: limits equal to the exact instance size
+  # exclude the type (capacity is compared against headroom incl. overhead) —
+  # leave generous headroom and let the instance-type requirement do the capping.
+  limits:
+    cpu: "100"
+    memory: 800Gi
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 5m

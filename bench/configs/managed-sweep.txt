@@ -1,0 +1,23 @@
+# Managed-provider sweep matrix for bench/managed-sweep.sh.
+# Fields:  provider | model_id | label | tiers | skip_commercial
+#   provider         bedrock | anthropic
+#   model_id         Bedrock inference-profile id, or Anthropic API model id
+#   label            used in the S3 result key: managed-<label>-<ts>.json
+#   tiers            extraction tiers to run (empty = all); text-only models -> clean-digital
+#   skip_commercial  "1" to skip the FATURA commercial set (text-only models)
+# Vision models (Opus, Sonnet, Llama-4-Scout, Qwen3-VL) run full tiers + commercial.
+# Text-only models (DeepSeek, GLM, Kimi) run clean-digital text + RAG, no commercial.
+# Lines beginning with # are ignored. Mirrors each model's Layer-A self-hosted tiers.
+
+# --- Layer C: frontier panel (managed only) ---
+bedrock|us.anthropic.claude-opus-4-8|opus-4.8-bedrock||
+bedrock|us.anthropic.claude-sonnet-4-6|sonnet-4.6-bedrock||
+anthropic|claude-opus-4-8|opus-4.8-anthropic||
+anthropic|claude-sonnet-4-6|sonnet-4.6-anthropic||
+
+# --- Layer B: same models on Bedrock (apples-to-apples vs the self-hosted refresh) ---
+bedrock|us.meta.llama4-scout-17b-instruct-v1:0|llama4-scout-bedrock||
+bedrock|qwen.qwen3-vl-235b-a22b|qwen3-vl-235b-bedrock||
+bedrock|deepseek.v3.2|deepseek-v3.2-bedrock|clean-digital|1
+bedrock|zai.glm-4.7|glm-4.7-bedrock|clean-digital|1
+bedrock|moonshotai.kimi-k2.5|kimi-k2.5-bedrock|clean-digital|1

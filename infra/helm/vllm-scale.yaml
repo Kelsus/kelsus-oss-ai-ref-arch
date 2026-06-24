@@ -1,0 +1,98 @@
+# vLLM serving — SCALE tier: Qwen2.5-VL-72B-Instruct, tensor-parallel across
+# 4x L40S on a Karpenter-provisioned g6e.12xlarge. Replaces deploy/vllm (same
+# name + service), so the gateway, scorer, and the nightly-off CronJob wiring
+# are unchanged. Swap back to dev with: kubectl apply -f vllm-dev.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: default
+  labels:
+    app: vllm
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # single-accelerator-set contention (SE-4)
+  selector:
+    matchLabels:
+      app: vllm
+  template:
+    metadata:
+      labels:
+        app: vllm
+    spec:
+      enableServiceLinks: false # VLLM_PORT collision (SE-3)
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: vllm
+          # PINNED (SE-22): was `:latest`, which silently rolled forward to v0.23 and
+          # shifted the fixed judge's scoring (the whole RAG table dropped 6-12 pts vs
+          # the prior run). A judge MUST be version-locked or cross-run numbers aren't
+          # comparable. v0.23.0 is the version the adopted-baseline 6-model pass ran on.
+          image: vllm/vllm-openai:v0.23.0
+          args:
+            - --model
+            - Qwen/Qwen2.5-VL-72B-Instruct
+            - --served-model-name
+            - local
+            - --tensor-parallel-size
+            - "4"
+            # 8192 is ample for the judge (short prompt: question+gold+answer, 200-tok
+            # output). Was 16384, but the floating `:latest` image rolled to vLLM v0.23
+            # which reserves more (VL encoder budget + larger CUDA-graph set), leaving
+            # <KV-cache room on 48GB L40S -> boot crash. Shorter ctx frees KV (SE-22).
+            - --max-model-len
+            - "8192"
+            - --gpu-memory-utilization
+            - "0.92"
+          ports:
+            - containerPort: 8000
+          env:
+            - { name: HF_HOME, value: /data/hf }
+            - name: HF_TOKEN # gated models (e.g. Llama); Secret, never in git
+              valueFrom:
+                secretKeyRef: { name: hf-token, key: token, optional: true }
+          resources:
+            requests:
+              cpu: "16"
+              memory: 96Gi
+            limits:
+              nvidia.com/gpu: 4 # forces the gpu-scale NodePool (xlarge can't fit 4)
+          # ~145GB of weights to download + load + CUDA graphs: allow ~60 min.
+          startupProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 20
+            failureThreshold: 180
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 15
+          volumeMounts:
+            - { name: hf-cache, mountPath: /data/hf }
+            - { name: dshm, mountPath: /dev/shm }
+      volumes:
+        - name: hf-cache
+          emptyDir:
+            sizeLimit: 220Gi
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi # NCCL shared memory for TP=4
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm
+  namespace: default
+spec:
+  selector:
+    app: vllm
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP # internal only (ADR-0001)

@@ -1,0 +1,88 @@
+# vLLM serving — DeepSeek-V3.2 (deepseek-ai/DeepSeek-V3.2), apples-to-apples partner
+# for Bedrock's deepseek.v3.2. SINGLE-BOX official FP8 — NOT the community AWQ.
+#
+# Why this supersedes the earlier AWQ/nightly draft (corrected 2026-06-18):
+#   * The Sept-2025 launch recipe said "nightly vLLM + custom DeepGEMM + AWQ" — STALE.
+#     v0.23.0's registry carries DeepseekV32ForCausalLM (+ DSA via GlmMoeDsaForCausalLM),
+#     so the official checkpoint serves on our PINNED stable. Verified at source.
+#   * deepseek-ai/DeepSeek-V3.2 is native FP8 (~685GB, F8_E4M3, open, 3.2M downloads) —
+#     the productized V3.2 Bedrock's deepseek.v3.2 most likely maps to. On H100 (640GB)
+#     it wouldn't fit (hence the old AWQ detour); on 8xH200 (1,128GB) it fits one box
+#     with ~440GB headroom. Serving official FP8 = a CLEANER same-weights match than AWQ.
+#
+# SMOKE-TEST BEFORE THE FULL EVAL (the only residual unknowns):
+#   * confirm the DSA indexer runs under v0.23.0's deepseek_v2 impl (1 real completion);
+#   * if outputs are garbled, V3.2 may need an explicit --tokenizer-mode deepseek_v32
+#     (couldn't confirm the flag in v0.23.0 — try default/auto first, add only if needed).
+#   * reasoning model: --reasoning-parser deepseek_v3; gateway coalesces null content (SE-23).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: default
+  labels: { app: vllm }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: vllm } }
+  template:
+    metadata: { labels: { app: vllm } }
+    spec:
+      enableServiceLinks: false
+      # Target the H200 NODEPOOL (p5e/p5en, 1,128GB): 685GB FP8 needs >640GB (H100).
+      # Pin the nodepool, not one instance type, so Karpenter can fall back
+      # p5e<->p5en when spot capacity for one is exhausted (UnfulfillableCapacity).
+      nodeSelector: { karpenter.sh/nodepool: gpu-h200 }
+      tolerations:
+        - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.23.0
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              exec vllm serve deepseek-ai/DeepSeek-V3.2 \
+                --served-model-name local \
+                --tensor-parallel-size 8 \
+                --reasoning-parser deepseek_v3 \
+                --gpu-memory-utilization 0.9 \
+                --max-model-len 32768 \
+                --max-num-seqs 32 \
+                --trust-remote-code \
+                --host 0.0.0.0 --port 8000
+          ports: [ { containerPort: 8000 } ]
+          env:
+            - { name: HF_HOME, value: /data/hf }
+            - { name: VLLM_USE_DEEP_GEMM, value: "0" }   # Hopper guidance from the V3.2 recipe
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef: { name: hf-token, key: token, optional: true }
+          resources:
+            requests: { cpu: "32", memory: 512Gi }
+            limits: { nvidia.com/gpu: 8 }
+          startupProbe: # generous: ~685GB FP8 download + load
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 20
+            failureThreshold: 360   # ~2h ceiling
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 30
+          volumeMounts:
+            - { name: hf-cache, mountPath: /data/hf }
+            - { name: dshm, mountPath: /dev/shm }
+      volumes:
+        - name: hf-cache
+          emptyDir: { sizeLimit: 800Gi }   # p5e local ephemeral holds the 685GB pull
+        - name: dshm
+          emptyDir: { medium: Memory, sizeLimit: 32Gi }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: vllm, namespace: default }
+spec:
+  selector: { app: vllm }
+  ports: [ { name: http, port: 8000, targetPort: 8000 } ]
+  type: ClusterIP

@@ -1,0 +1,17 @@
+RAG quality — single fixed-judge pass (comparable across models)
+Judge: Qwen2.5-VL-72B-Instruct (served as 'local'), vLLM v0.23.0 (PINNED), temp=0.
+Baseline: 2026-06-17. All 6 models judged in ONE pass -> mutually comparable.
+n=250 grounded regulated-finance QA pairs; same retrieval+rerank for all.
+
+  model                     RAG acc            95% CI     n   (single fixed judge)
+  kimi-k2-instruct            43.2%  [ 37.2,  49.4]   250
+  glm-4.5-air                 36.4%  [ 30.7,  42.5]   250
+  deepseek-v3.1               36.4%  [ 30.7,  42.5]   250
+  qwen2.5-vl-72b              28.0%  [ 22.8,  33.9]   250
+  llama4-scout                25.2%  [ 20.2,  30.9]   250
+  qwen3-235b                  23.6%  [ 18.8,  29.2]   250
+
+NOTE (SE-22): this SUPERSEDES the earlier 5-model table (GLM 45.6% / DeepSeek 43.2% / ...).
+That table used an unpinned ':latest' judge image that rolled to a newer vLLM; re-judging
+the identical answers here shifted every model down 6-12 pts (uniformly stricter regime).
+A fixed judge must be version-locked. Do NOT mix these numbers with the retired table.

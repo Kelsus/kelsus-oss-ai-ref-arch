@@ -1,0 +1,27 @@
+# Lets the eval Job (SA "bench") scale the vllm deployment to 0 when it finishes
+# — so the Job owns GPU release (see job-quality.yaml's trap). S3 access for the
+# same SA comes from the EKS Pod Identity association (Terraform), not here.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: bench-gpu-release
+  namespace: default
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    resourceNames: ["vllm"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: bench-gpu-release
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: bench
+    namespace: default
+roleRef:
+  kind: Role
+  name: bench-gpu-release
+  apiGroup: rbac.authorization.k8s.io

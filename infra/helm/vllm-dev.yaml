@@ -1,0 +1,101 @@
+# vLLM serving — dev tier (1x L40S on g6e.xlarge).
+# Plain manifests for the first serving milestone; a parameterized Helm chart
+# follows. Model is pulled from Hugging Face at startup (dev has NAT egress);
+# the sovereign no-egress path loads from the in-account S3 bucket instead
+# (serving/seed-model.sh + an S3 init-container) — wired for the scale tier.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: default
+  labels:
+    app: vllm
+spec:
+  replicas: 1
+  # Single GPU: kill the old pod before starting the new one, otherwise the new
+  # pod can't get the GPU (held by the old) and rollout deadlocks.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vllm
+  template:
+    metadata:
+      labels:
+        app: vllm
+    spec:
+      # K8s injects legacy per-Service env vars (e.g. VLLM_PORT=tcp://...:8000)
+      # which collide with vLLM's own VLLM_PORT (expects an int) and crash it.
+      # Disable that injection.
+      enableServiceLinks: false
+      # Land on the GPU node group; tolerate its taint.
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest
+          args:
+            # Vision-language model: serves text (chat/RAG/extract) AND reads
+            # document images directly (no separate OCR). One model on the GPU.
+            - --model
+            - Qwen/Qwen2.5-VL-7B-Instruct
+            - --served-model-name
+            - local
+            - --max-model-len
+            - "16384"
+            - --gpu-memory-utilization
+            - "0.92"
+          ports:
+            - containerPort: 8000
+          env:
+            - name: HF_HOME
+              value: /data/hf
+          resources:
+            requests:
+              cpu: "2"
+              memory: 16Gi
+            limits:
+              nvidia.com/gpu: 1
+          # Image (~10GB) + weights (~15GB) pull on first start; give it room.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 20
+            failureThreshold: 90    # up to ~30 min to become healthy
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 15
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /data/hf
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: hf-cache
+          emptyDir:
+            sizeLimit: 60Gi
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm
+  namespace: default
+spec:
+  selector:
+    app: vllm
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP   # internal only; no public ingress (ADR-0001)

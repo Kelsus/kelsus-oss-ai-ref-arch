@@ -1,0 +1,6 @@
+{
+  "model_id": "meta-llama/Llama-4-Scout-17B-16E-Instruct", "served_as": "local", "runtime": "vLLM",
+  "quantization": "bf16", "instance_type": "p5.48xlarge", "gpu": "8x NVIDIA H100 (640GB)",
+  "tensor_parallel": 8, "region": "us-west-2", "instance_hourly_usd": 15.0,
+  "price_basis": "SPOT placeholder - recompute from actual at harvest"
+}

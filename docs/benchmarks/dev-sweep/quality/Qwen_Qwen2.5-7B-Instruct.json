@@ -1,0 +1,7 @@
+{
+  "extraction_f1_pct": 99.0,
+  "extraction_invoices": 12,
+  "rag_fact_coverage_pct": 100.0,
+  "rag_grounding_pct": 100.0,
+  "model": "Qwen/Qwen2.5-7B-Instruct"
+}

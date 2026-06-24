@@ -1,0 +1,38 @@
+# vLLM serving values (Sprint 2 wiring). Tiers differ only in values (ADR-0005).
+# Applied by infra/helm/deploy.sh against the cluster Terraform created.
+
+image:
+  repository: vllm/vllm-openai
+  tag: latest        # pin a digest before public release
+
+# Weights are loaded from the in-account S3 bucket seeded by serving/seed-model.sh.
+# An initContainer syncs s3://<model_bucket>/<model> -> /models on the node's NVMe.
+model:
+  id: Qwen/Qwen2.5-7B-Instruct      # overridden per tier / per benchmark candidate
+  s3Uri: ""                         # set by deploy.sh from the terraform output
+  quantization: fp8                  # fp8 | awq | none
+  tensorParallelSize: 1              # dev=1 (1 GPU) ; scale=4 (g6e.12xlarge)
+  maxModelLen: 32768
+  dtype: auto
+
+# Land only on GPU nodes (tainted by the gpu node group).
+resources:
+  limits:
+    nvidia.com/gpu: 1                # scale: 4
+nodeSelector:
+  workload: inference
+tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+
+service:
+  type: ClusterIP                    # fronted by an INTERNAL ALB only (no public ingress)
+  port: 8000
+
+# Prometheus scrapes vLLM's /metrics (tokens/s, queue depth, KV-cache, GPU util).
+serviceMonitor:
+  enabled: true
+
+autoscaling:
+  enabled: false                     # Sprint 4: scale on queue depth / concurrency

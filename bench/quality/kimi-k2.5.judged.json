@@ -1,0 +1,13 @@
+{
+  "model": "kimi-k2.5",
+  "accuracy_pct": 37.6,
+  "ci_pct": [
+    31.8,
+    43.7
+  ],
+  "n": 250,
+  "judge": {
+    "url": "http://127.0.0.1:18003/v1",
+    "model": "local"
+  }
+}

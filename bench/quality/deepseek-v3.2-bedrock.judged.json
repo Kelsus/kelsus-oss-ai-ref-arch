@@ -1,0 +1,13 @@
+{
+  "model": "deepseek-v3.2-bedrock",
+  "accuracy_pct": 30.8,
+  "ci_pct": [
+    25.4,
+    36.8
+  ],
+  "n": 250,
+  "judge": {
+    "url": "http://127.0.0.1:8000/v1",
+    "model": "local"
+  }
+}

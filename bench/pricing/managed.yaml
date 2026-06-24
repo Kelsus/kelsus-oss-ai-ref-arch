@@ -1,0 +1,36 @@
+# Managed-API list prices ($ per 1M tokens). Used to turn the per-request token
+# usage captured in each result's `managed_perf` block into $/M-out and $/request
+# for the comparison doc. Prices change — this file is DATE-STAMPED; re-verify
+# before publishing.
+#
+# as_of: 2026-06-18
+# sources:
+#   - Anthropic (Opus 4.8, Sonnet 4.6): claude-api skill reference, cached 2026-06-04.
+#   - Bedrock-hosted Anthropic: assumed = first-party Anthropic list. NOT in the
+#     AWS Price List API under standard "Claude Opus/Sonnet" model names, so unverified
+#     — and aggregators suggest Bedrock Claude may carry a premium over direct. VERIFY.
+#   - Bedrock OSS models: AWS Price List API (service AmazonBedrock), regionCode
+#     us-west-2, STANDARD on-demand tier (the tier our sweep used), 2026-06-18.
+#     NOTE: Bedrock also lists cheaper "flex" (async) and pricier "priority" tiers per
+#     model — we priced the standard on-demand path.
+as_of: "2026-06-18"
+
+prices:
+  # --- frontier (Anthropic) — confirmed ---
+  "us.anthropic.claude-opus-4-8":   { in: 5.00, out: 25.00 }   # Opus 4.8 (Bedrock)
+  "claude-opus-4-8":                { in: 5.00, out: 25.00 }   # Opus 4.8 (Anthropic direct)
+  "us.anthropic.claude-sonnet-4-6": { in: 3.00, out: 15.00 }   # Sonnet 4.6 (Bedrock)
+  "claude-sonnet-4-6":              { in: 3.00, out: 15.00 }   # Sonnet 4.6 (Anthropic direct)
+
+  # --- OSS-on-Bedrock — AWS Price List API, us-west-2, standard on-demand, 2026-06-18 ---
+  "us.meta.llama4-scout-17b-instruct-v1:0": { in: 0.17, out: 0.66 }
+  "qwen.qwen3-vl-235b-a22b":                { in: 0.53, out: 2.66 }
+  "deepseek.v3.2":                          { in: 0.62, out: 1.85 }
+  "zai.glm-4.7":                            { in: 0.60, out: 2.20 }
+  "zai.glm-5":                              { in: 1.00, out: 3.20 }   # GLM-5 (Bedrock list, 2026-06-22)
+  "moonshotai.kimi-k2.5":                   { in: 0.60, out: 3.00 }
+
+# For the apples-to-apples cost column, the self-hosted $/M-out is computed
+# separately from measured spot $/hr / throughput (see docs/benchmarks/scale-*),
+# NOT from this file — managed and self-hosted price on different bases (per-token
+# all-in vs raw GPU-hour). The comparison doc states that caveat explicitly.

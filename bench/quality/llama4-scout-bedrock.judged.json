@@ -1,0 +1,13 @@
+{
+  "model": "llama4-scout-bedrock",
+  "accuracy_pct": 24.8,
+  "ci_pct": [
+    19.9,
+    30.5
+  ],
+  "n": 250,
+  "judge": {
+    "url": "http://127.0.0.1:8000/v1",
+    "model": "local"
+  }
+}

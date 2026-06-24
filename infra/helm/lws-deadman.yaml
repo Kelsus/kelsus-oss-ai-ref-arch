@@ -1,0 +1,103 @@
+# In-cluster dead-man for the multi-node LWS serve (SE-7/SE-18: never put the
+# laptop in the cost-control loop). Runs every 30 min on the CPU nodes.
+#   * LWS absent or pods Pending (no node) -> leave it ($0 while hunting spot).
+#   * lone leader (worker not landing), GPU node up >=15m -> delete (2nd node ICEing).
+#   * not-Ready & GPU NODE up >=75m -> delete (stuck / crash-loop). We age off the NODE,
+#     not the pod: RecreateGroupOnPodRestart recreates pods (resetting pod startTime) on
+#     every crash, so a tight crash-loop never aged past a pod threshold and once hid a
+#     ~6h/$250 burn. The GPU node persists across group-restarts -> it's the true clock.
+#   * Ready >=3h -> delete the LWS (a forgotten idle serve).
+# Karpenter then consolidates the empty p5e/p5en away. The kill path DELETES the
+# LWS (an LWS is not a Deployment — scaling deploy/vllm would miss it).
+#
+# Image: gcr.io/cloud-builders/kubectl (Debian: has bash + GNU `date -d` + kubectl).
+# bitnami/kubectl was purged from Docker Hub (2025) and alpine images lack GNU date.
+# activeDeadlineSeconds bounds a wedged job so concurrencyPolicy:Forbid can't stall
+# the schedule (the failure mode that left us-west-2's first dead-man stuck 10h).
+# Region-agnostic: operates on the local cluster's LWS via the in-cluster SA token.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: lws-deadman
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: lws-deadman
+rules:
+  - apiGroups: ["leaderworkerset.x-k8s.io"]
+    resources: ["leaderworkersets"]
+    verbs: ["get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: lws-deadman
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: lws-deadman
+subjects:
+  - kind: ServiceAccount
+    name: lws-deadman
+    namespace: default
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: lws-deadman
+  namespace: default
+spec:
+  schedule: "*/10 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 120
+      backoffLimit: 1
+      template:
+        spec:
+          serviceAccountName: lws-deadman
+          restartPolicy: Never
+          containers:
+            - name: deadman
+              image: gcr.io/cloud-builders/kubectl:latest
+              command: ["bash", "-lc"]
+              args:
+                - |
+                  kubectl get lws vllm -n default >/dev/null 2>&1 || { echo "no LWS"; exit 0; }
+                  NODE=$(kubectl get pod vllm-0 -n default -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)
+                  [ -z "$NODE" ] && { echo "Pending (hunting, \$0) — leave it"; exit 0; }
+                  NOW=$(date -u +%s)
+                  # AGE OFF THE NODE, NOT THE POD: RecreateGroupOnPodRestart recreates the pods on
+                  # every crash (resetting pod startTime), so a tight crash-loop never ages past a
+                  # pod threshold — once hid a ~6h/$250 burn. The GPU node persists across group-
+                  # restarts within one bring-up, so its creationTimestamp is the true clock.
+                  NCT=$(kubectl get node "$NODE" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null || true)
+                  NMIN=$(( (NOW - $(date -u -d "${NCT:-$(date -u +%FT%TZ)}" +%s)) / 60 ))
+                  # Lone-leader burn: leader on a GPU node but the worker isn't scheduled (2nd node
+                  # not landing) -> abort fast (node >=15m) so the poller re-evaluates, not a 3h burn.
+                  WNODE=$(kubectl get pod vllm-0-1 -n default -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)
+                  if [ -z "$WNODE" ]; then
+                    echo "lone leader on $NODE (node ${NMIN}m), worker unscheduled"
+                    [ "$NMIN" -ge 15 ] && { echo "DEAD-MAN: lone-leader, node up >=15m (2nd node not landing) -> delete LWS"; kubectl delete lws vllm -n default --ignore-not-found; }
+                    exit 0
+                  fi
+                  READY=$(kubectl get pod vllm-0 -n default -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+                  if [ "$READY" = "True" ]; then
+                    RT=$(kubectl get pod vllm-0 -n default -o jsonpath='{.status.conditions[?(@.type=="Ready")].lastTransitionTime}' 2>/dev/null)
+                    RAGE=$(( (NOW - $(date -u -d "$RT" +%s)) / 3600 ))
+                    echo "serving ${RAGE}h"
+                    [ "$RAGE" -ge 3 ] && { echo "DEAD-MAN: serving Ready >=3h -> delete"; kubectl delete lws vllm -n default --ignore-not-found; }
+                    exit 0
+                  fi
+                  # Both on-node, not Ready: a clean bring-up (1.4TB sync + load + compile) is <~60m.
+                  # >=75m not-Ready means stuck or crash-looping (e.g. the old indexer k_norm loop) -> kill.
+                  echo "both on-node, not-ready; GPU node age ${NMIN}m (bring-up/loading)"
+                  [ "$NMIN" -ge 75 ] && { echo "DEAD-MAN: not-Ready & node up >=75m (stuck/crash-loop) -> delete LWS"; kubectl delete lws vllm -n default --ignore-not-found; }
+                  exit 0

@@ -1,0 +1,36 @@
+# Minimal CI: validate the IaC, compile the Python, syntax-check the shell.
+# Fast (<2 min), no AWS credentials, no cluster — pure static validation.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: 1.12.1
+      - name: fmt check
+        run: tofu fmt -check -recursive infra/terraform
+      - name: validate dev
+        run: |
+          tofu -chdir=infra/terraform/envs/dev init -backend=false -input=false
+          tofu -chdir=infra/terraform/envs/dev validate
+      - name: validate scale
+        run: |
+          tofu -chdir=infra/terraform/envs/scale init -backend=false -input=false
+          tofu -chdir=infra/terraform/envs/scale validate
+
+  python-and-shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: compile python
+        run: python3 -m compileall -q apps bench data
+      - name: shell syntax
+        run: |
+          for f in $(git ls-files '*.sh'); do bash -n "$f"; done

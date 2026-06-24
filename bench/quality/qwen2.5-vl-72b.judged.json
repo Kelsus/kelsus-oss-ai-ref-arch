@@ -1,0 +1,13 @@
+{
+  "model": "qwen2.5-vl-72b",
+  "accuracy_pct": 28.0,
+  "ci_pct": [
+    22.8,
+    33.9
+  ],
+  "n": 250,
+  "judge": {
+    "url": "http://127.0.0.1:8000/v1",
+    "model": "local"
+  }
+}

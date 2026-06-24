@@ -1,0 +1,12 @@
+{
+  "model_id": "Qwen/Qwen2.5-VL-7B-Instruct",
+  "served_as": "local",
+  "runtime": "vLLM",
+  "quantization": "none (bf16)",
+  "instance_type": "g6e.xlarge",
+  "gpu": "1x NVIDIA L40S (48GB)",
+  "tensor_parallel": 1,
+  "region": "us-east-1",
+  "instance_hourly_usd": 1.861,
+  "price_basis": "on-demand, us-east-1, 2026-06 snapshot (verify before publishing)"
+}

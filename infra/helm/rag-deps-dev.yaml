@@ -1,0 +1,140 @@
+# RAG dependencies (dev) — both stateless/CPU so the GPU stays on the LLM.
+#  - embeddings: HF Text Embeddings Inference serving BGE (768-dim)
+#  - pgvector:   Postgres 16 + pgvector extension (vector store)
+# Internal ClusterIP services only (ADR-0001). Dev storage is ephemeral.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: embeddings
+  namespace: default
+  labels: { app: embeddings }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: embeddings } }
+  template:
+    metadata: { labels: { app: embeddings } }
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: tei
+          # Listen on a high port (>=1025): the EKS node SG only allows
+          # cross-node pod traffic on the ephemeral range + DNS, so a service
+          # on :80 is unreachable from pods on other nodes (sharp edge).
+          image: ghcr.io/huggingface/text-embeddings-inference:cpu-latest
+          args: ["--model-id", "BAAI/bge-base-en-v1.5", "--port", "8080"]
+          ports: [ { containerPort: 8080 } ]
+          resources:
+            requests: { cpu: "1", memory: 2Gi }
+            limits: { memory: 4Gi }
+          readinessProbe:
+            httpGet: { path: /health, port: 8080 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 60
+          volumeMounts:
+            - { name: cache, mountPath: /data }
+      volumes:
+        - name: cache
+          emptyDir: { sizeLimit: 8Gi }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: embeddings, namespace: default }
+spec:
+  selector: { app: embeddings }
+  ports: [ { name: http, port: 80, targetPort: 8080 } ]   # svc :80 -> pod :8080
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pgvector
+  namespace: default
+  labels: { app: pgvector }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: pgvector } }
+  template:
+    metadata: { labels: { app: pgvector } }
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: postgres
+          image: pgvector/pgvector:pg16
+          env:
+            - { name: POSTGRES_USER, value: rag }
+            # Password from the `rag-db` secret (generated at deploy time, never
+            # committed). deploy.sh creates it if absent; or once, by hand:
+            #   kubectl create secret generic rag-db --from-literal=password="$(openssl rand -hex 16)"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: rag-db, key: password }
+            - { name: POSTGRES_DB, value: rag }
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          ports: [ { containerPort: 5432 } ]
+          resources:
+            requests: { cpu: "250m", memory: 512Mi }
+            limits: { memory: 1Gi }
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", "rag", "-d", "rag"] }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+      volumes:
+        - name: data
+          emptyDir: {}     # dev: ephemeral
+---
+apiVersion: v1
+kind: Service
+metadata: { name: pgvector, namespace: default }
+spec:
+  selector: { app: pgvector }
+  ports: [ { name: pg, port: 5432, targetPort: 5432 } ]
+  type: ClusterIP
+---
+# Reranker (TEI serving a cross-encoder) — re-scores top-N vector hits before
+# the LLM answers. CPU, high port (see the cross-node SG note above).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reranker
+  namespace: default
+  labels: { app: reranker }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: reranker } }
+  template:
+    metadata: { labels: { app: reranker } }
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: tei
+          image: ghcr.io/huggingface/text-embeddings-inference:cpu-latest
+          args: ["--model-id", "BAAI/bge-reranker-base", "--port", "8080"]
+          ports: [ { containerPort: 8080 } ]
+          resources:
+            requests: { cpu: "250m", memory: 1500Mi }   # small request; bursts on CPU
+            limits: { memory: 4Gi }
+          readinessProbe:
+            httpGet: { path: /health, port: 8080 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 60
+          volumeMounts:
+            - { name: cache, mountPath: /data }
+      volumes:
+        - name: cache
+          emptyDir: { sizeLimit: 8Gi }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: reranker, namespace: default }
+spec:
+  selector: { app: reranker }
+  ports: [ { name: http, port: 80, targetPort: 8080 } ]
+  type: ClusterIP

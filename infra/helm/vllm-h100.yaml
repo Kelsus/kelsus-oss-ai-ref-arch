@@ -1,0 +1,89 @@
+# vLLM serving — H100 tier: Qwen2.5-VL-72B-Instruct, TP=8 across 8x H100 80GB
+# on a Karpenter-provisioned p5.48xlarge (spot). Replaces deploy/vllm (same
+# name + service) so gateway/scorer/CronJob wiring is unchanged.
+# Swap back: kubectl apply -f vllm-dev.yaml (7B) or vllm-scale.yaml (g6e TP=4).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: default
+  labels:
+    app: vllm
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # single-accelerator-set contention (SE-4)
+  selector:
+    matchLabels:
+      app: vllm
+  template:
+    metadata:
+      labels:
+        app: vllm
+    spec:
+      enableServiceLinks: false # VLLM_PORT collision (SE-3)
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest
+          args:
+            - --model
+            - Qwen/Qwen2.5-VL-72B-Instruct
+            - --served-model-name
+            - local
+            - --tensor-parallel-size
+            - "8"
+            - --max-model-len
+            - "32768"
+            - --gpu-memory-utilization
+            - "0.90"
+          ports:
+            - containerPort: 8000
+          env:
+            - { name: HF_HOME, value: /data/hf }
+            - name: HF_TOKEN # gated models (e.g. Llama); Secret, never in git
+              valueFrom:
+                secretKeyRef: { name: hf-token, key: token, optional: true }
+          resources:
+            requests:
+              cpu: "32"
+              memory: 256Gi
+            limits:
+              nvidia.com/gpu: 8 # forces the gpu-h100 NodePool (only 8-GPU pool)
+          startupProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 20
+            failureThreshold: 180 # download ~145GB + TP=8 load: allow ~60 min
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 15
+          volumeMounts:
+            - { name: hf-cache, mountPath: /data/hf }
+            - { name: dshm, mountPath: /dev/shm }
+      volumes:
+        - name: hf-cache
+          emptyDir:
+            sizeLimit: 220Gi
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi # NCCL shm for TP=8
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm
+  namespace: default
+spec:
+  selector:
+    app: vllm
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP # internal only (ADR-0001)

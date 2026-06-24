@@ -1,0 +1,69 @@
+# vLLM serving — Llama-4-Scout-17B-16E-Instruct, the exact-same-weights pair for
+# Bedrock's meta.llama4-scout. Natively multimodal (image+text); BF16 ~218GB fits
+# one 8-GPU box. Used here to re-score the COMMERCIAL tier on corrected FATURA gold
+# (the one self-hosted cell still on pre-corrected gold). Gated model -> needs hf-token.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: default
+  labels: { app: vllm }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: vllm } }
+  template:
+    metadata: { labels: { app: vllm } }
+    spec:
+      enableServiceLinks: false
+      nodeSelector: { nvidia.com/gpu.present: "true" }   # BF16 ~218GB fits H100 or H200
+      tolerations:
+        - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.23.0
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              exec vllm serve meta-llama/Llama-4-Scout-17B-16E-Instruct \
+                --served-model-name local \
+                --tensor-parallel-size 8 \
+                --limit-mm-per-prompt '{"image":2,"video":0}' \
+                --max-model-len 32768 \
+                --trust-remote-code \
+                --host 0.0.0.0 --port 8000
+          ports: [ { containerPort: 8000 } ]
+          env:
+            - { name: HF_HOME, value: /data/hf }
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef: { name: hf-token, key: token, optional: true }
+          resources:
+            requests: { cpu: "32", memory: 256Gi }
+            limits: { nvidia.com/gpu: 8 }
+          startupProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 20
+            failureThreshold: 240
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 30
+          volumeMounts:
+            - { name: hf-cache, mountPath: /data/hf }
+            - { name: dshm, mountPath: /dev/shm }
+      volumes:
+        - name: hf-cache
+          emptyDir: { sizeLimit: 320Gi }
+        - name: dshm
+          emptyDir: { medium: Memory, sizeLimit: 32Gi }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: vllm, namespace: default }
+spec:
+  selector: { app: vllm }
+  ports: [ { name: http, port: 8000, targetPort: 8000 } ]
+  type: ClusterIP

@@ -1,0 +1,81 @@
+# Gateway (dev) — FastAPI in front of vLLM + embeddings + pgvector.
+# Code is mounted from the `gateway-app` ConfigMap (created by deploy.sh from
+# apps/gateway/app.py); deps are pip-installed at start. The production variant
+# is a pinned, pre-built image in ECR — this keeps the dev loop fast.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: default
+  labels: { app: gateway }
+spec:
+  replicas: 2 # eval load made a single replica flap NotReady -> conn refused
+  strategy: { type: RollingUpdate }
+  selector: { matchLabels: { app: gateway } }
+  template:
+    metadata: { labels: { app: gateway } }
+    spec:
+      enableServiceLinks: false
+      serviceAccountName: gateway   # EKS Pod Identity -> bedrock:InvokeModel (Terraform); managed-provider runs
+      # NOTE: the gateway must NOT tolerate the GPU taint. A gateway pod on the
+      # GPU node keeps it non-empty, so Karpenter never consolidates it and the
+      # dead-man (which only scales vllm to 0) can't bring the GPU box down —
+      # an unbounded cost leak (learned the hard way). Gateway stays on CPU
+      # nodes; the real RAG-under-load bug was the psycopg2 leak (SE-15), not
+      # placement. Light footprint so 2 replicas fit alongside the RAG deps.
+      containers:
+        - name: gateway
+          image: python:3.12-slim
+          workingDir: /app
+          command: ["sh", "-c"]
+          args:
+            # --limit-concurrency: overflow returns a retryable 503 instead of a
+            # dropped/empty connection (the scorer retries 503s). 2 workers for
+            # headroom under concurrent slow (reasoning-model) requests.
+            - >-
+              pip install --no-cache-dir --quiet
+              fastapi uvicorn "psycopg2-binary>=2.9" pypdf python-multipart pymupdf boto3 &&
+              exec uvicorn app:app --host 0.0.0.0 --port 8000
+              --workers 2 --limit-concurrency 48 --timeout-keep-alive 75
+          env:
+            - { name: VLLM_URL, value: "http://vllm:8000/v1" }
+            - { name: EMBED_URL, value: "http://embeddings:80" }
+            # DSN carries no password (SOC2 CC6: no creds in manifests). libpq/
+            # psycopg2 reads PGPASSWORD, injected from the `rag-db` secret below.
+            - { name: PG_DSN, value: "postgresql://rag@pgvector:5432/rag" }
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef: { name: rag-db, key: password }
+            # Generation provider. Default "local" = unchanged vLLM path. Managed runs
+            # flip this per-model via `kubectl set env deploy/gateway PROVIDER=... BEDROCK_MODEL_ID=...`.
+            - { name: PROVIDER, value: "local" }
+            - { name: AWS_REGION, value: "us-west-2" }   # scale cluster region; all target Bedrock models live here
+            # Optional: the gateway runs fine without it (bedrock + local need no key).
+            # Jon creates the secret only for the anthropic-direct column:
+            #   kubectl create secret generic anthropic-api-key --from-literal=key=...
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef: { name: anthropic-api-key, key: key, optional: true }
+          ports: [ { containerPort: 8000 } ]
+          resources:
+            requests: { cpu: "250m", memory: 768Mi } # light proxy; 2 replicas fit on CPU nodes
+            limits: { memory: 2Gi }
+          volumeMounts:
+            - { name: code, mountPath: /app }
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5        # busy uvicorn must not flap the endpoint
+            failureThreshold: 30     # allow time for pip install at startup
+      volumes:
+        - name: code
+          configMap: { name: gateway-app }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: gateway, namespace: default }
+spec:
+  selector: { app: gateway }
+  ports: [ { name: http, port: 8000, targetPort: 8000 } ]
+  type: ClusterIP

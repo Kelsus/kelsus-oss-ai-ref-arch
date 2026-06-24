@@ -1,0 +1,98 @@
+# GPU dead-man's switch, Karpenter edition. "off" = scale vLLM to 0; Karpenter
+# consolidates the empty node ~5 min later. Runs nightly (06:00 UTC) as the
+# always-on global cost belt. CONDITIONAL (SE-20): it SKIPS scaling down if the
+# bench-quality eval Job is active — otherwise it kills a legitimately in-progress
+# run (e.g. a multi-hour 547GB model download that crosses 06:00, which is exactly
+# how a Kimi run died). Per-run cost is bounded by the in-cluster gpu-deadline Job.
+# Resume: make gpu-resume (scales vLLM back to 1).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gpu-off
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gpu-off
+  namespace: default
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    resourceNames: ["vllm"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["vllm"]
+    verbs: ["get"]
+  - apiGroups: ["batch"] # read bench-quality to skip scaling down mid-run (SE-20)
+    resources: ["jobs"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gpu-off
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: gpu-off
+    namespace: default
+roleRef:
+  kind: Role
+  name: gpu-off
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: gpu-nightly-off
+  namespace: default
+spec:
+  schedule: "0 6 * * *" # 06:00 UTC nightly
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      ttlSecondsAfterFinished: 172800
+      template:
+        spec:
+          serviceAccountName: gpu-off
+          restartPolicy: Never
+          containers:
+            - name: scale-down
+              # python:3.12-slim is proven-pullable in this cluster; PATCH the
+              # API directly with the SA token — no third-party kubectl image
+              # in the kill path (bitnami/kubectl tags vanished: SE lesson).
+              image: python:3.12-slim
+              command:
+                - python3
+                - -c
+                - |
+                  import json, ssl, urllib.request
+                  sa = "/var/run/secrets/kubernetes.io/serviceaccount"
+                  tok = open(f"{sa}/token").read()
+                  ns = open(f"{sa}/namespace").read().strip()
+                  ctx = ssl.create_default_context(cafile=f"{sa}/ca.crt")
+                  base = "https://kubernetes.default.svc"
+                  hdr = {"Authorization": f"Bearer {tok}"}
+                  def api(path, data=None, method="GET"):
+                      h = dict(hdr)
+                      if data: h["Content-Type"] = "application/merge-patch+json"
+                      req = urllib.request.Request(base + path, data=(json.dumps(data).encode() if data else None),
+                                                   headers=h, method=method)
+                      return urllib.request.urlopen(req, context=ctx, timeout=30)
+                  # SKIP if an eval is in progress (don't kill a legit run, SE-20).
+                  try:
+                      st = json.load(api(f"/apis/batch/v1/namespaces/{ns}/jobs/bench-quality")).get("status", {})
+                      if st.get("active"):
+                          print("bench-quality active -> eval in progress, NOT scaling down"); raise SystemExit(0)
+                  except urllib.error.HTTPError as e:
+                      if e.code != 404: raise   # 404 = no eval job, safe to proceed
+                  r = api(f"/apis/apps/v1/namespaces/{ns}/deployments/vllm/scale",
+                          data={"spec": {"replicas": 0}}, method="PATCH")
+                  print("no active eval -> scaled vllm to 0:", r.status)
+              resources:
+                requests: { cpu: 50m, memory: 64Mi }

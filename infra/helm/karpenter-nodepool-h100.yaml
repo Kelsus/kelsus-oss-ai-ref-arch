@@ -1,0 +1,43 @@
+# H100 capacity: p5.48xlarge (8x H100 80GB, 192 vCPU) — the frontier-tier box
+# for 70B+ validation and the DeepSeek/Kimi sweep. SPOT ONLY by decision (Jon):
+# ~50-70% off on-demand, and benchmark batches tolerate interruption. If spot
+# ICEs, we wait (Karpenter retries) rather than silently paying ~$55-98/hr OD.
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpu-h100
+spec:
+  template:
+    metadata:
+      labels:
+        workload: inference
+        tier: h100
+        nvidia.com/gpu.present: "true"
+    spec:
+      taints:
+        - key: nvidia.com/gpu
+          value: "true"
+          effect: NoSchedule
+      requirements:
+        # All viable 8-GPU boxes, spot-only; Karpenter takes the cheapest pool
+        # with capacity (typically p4d ~$8-12/hr before p5 ~$20-30/hr). More
+        # types = more spot pools = capacity actually lands (the fleet API
+        # itself recommends >=5 types for spot flexibility).
+        # spot preferred on price; on-demand is the explicit last resort so a
+        # region-wide spot drought can't stall the benchmark (Jon: progress
+        # over waiting; worst case ~$33/hr p4d OD, within the approved envelope).
+        - { key: karpenter.sh/capacity-type, operator: In, values: [spot, on-demand] }
+        - { key: node.kubernetes.io/instance-type, operator: In, values: [p5.48xlarge, p4d.24xlarge, p4de.24xlarge] }
+        - { key: kubernetes.io/arch, operator: In, values: [amd64] }
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: gpu
+      expireAfter: 720h
+  # Exactly one p5.48xlarge — this is a benchmark box, not a fleet.
+  limits:
+    cpu: "192"
+    memory: 2000Gi
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 5m

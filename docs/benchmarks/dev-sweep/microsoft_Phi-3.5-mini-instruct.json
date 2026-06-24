@@ -1,0 +1,101 @@
+{
+  "model": "local",
+  "endpoint": "http://vllm:8000/v1",
+  "max_tokens": 256,
+  "prompt_chars": 178,
+  "levels": [
+    {
+      "concurrency": 1,
+      "requests": 32,
+      "errors": 0,
+      "ttft_ms": {
+        "p50": 19.8,
+        "p95": 20.5,
+        "p99": 21.6
+      },
+      "total_ms": {
+        "p50": 2766.8,
+        "p95": 2767.8,
+        "p99": 2768.5
+      },
+      "completion_tokens": 8192,
+      "wall_s": 88.54,
+      "throughput_tok_s": 92.5
+    },
+    {
+      "concurrency": 8,
+      "requests": 32,
+      "errors": 0,
+      "ttft_ms": {
+        "p50": 40.7,
+        "p95": 46.4,
+        "p99": 46.7
+      },
+      "total_ms": {
+        "p50": 3063.8,
+        "p95": 3070.1,
+        "p99": 3071.0
+      },
+      "completion_tokens": 8192,
+      "wall_s": 12.26,
+      "throughput_tok_s": 668.1
+    },
+    {
+      "concurrency": 32,
+      "requests": 96,
+      "errors": 0,
+      "ttft_ms": {
+        "p50": 61.9,
+        "p95": 153.1,
+        "p99": 154.4
+      },
+      "total_ms": {
+        "p50": 3783.8,
+        "p95": 3898.5,
+        "p99": 3901.2
+      },
+      "completion_tokens": 24576,
+      "wall_s": 11.47,
+      "throughput_tok_s": 2142.7
+    },
+    {
+      "concurrency": 64,
+      "requests": 192,
+      "errors": 0,
+      "ttft_ms": {
+        "p50": 76.8,
+        "p95": 114.6,
+        "p99": 117.5
+      },
+      "total_ms": {
+        "p50": 4658.7,
+        "p95": 4706.1,
+        "p99": 4709.9
+      },
+      "completion_tokens": 49152,
+      "wall_s": 14.07,
+      "throughput_tok_s": 3494.1
+    }
+  ],
+  "config": {
+    "model_id": "Qwen/Qwen2.5-VL-7B-Instruct",
+    "served_as": "local",
+    "runtime": "vLLM",
+    "quantization": "none (bf16)",
+    "instance_type": "g6e.xlarge",
+    "gpu": "1x NVIDIA L40S (48GB)",
+    "tensor_parallel": 1,
+    "region": "us-east-1",
+    "instance_hourly_usd": 1.861,
+    "price_basis": "on-demand, us-east-1, 2026-06 snapshot (verify before publishing)"
+  },
+  "cost": {
+    "peak_throughput_tok_s": 3494.1,
+    "usd_per_million_output_tokens": {
+      "at_peak": 0.1479,
+      "at_90pct_util": 0.1644,
+      "at_60pct_util": 0.2466,
+      "at_30pct_util": 0.4932
+    }
+  }
+}

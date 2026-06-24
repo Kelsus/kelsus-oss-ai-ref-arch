@@ -1,0 +1,40 @@
+# Automated dependency updates — vulnerability management evidence (SOC2 CC7.1).
+# Dependabot opens PRs for outdated/insecure deps; the CODEOWNERS + branch-
+# protection gate then forces a maintainer to review each one before merge.
+version: 2
+updates:
+  # --- Python apps ----------------------------------------------------------
+  - package-ecosystem: pip
+    directory: /apps/claims-intake
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    labels: [dependencies, security]
+  - package-ecosystem: pip
+    directory: /apps/sovereign-rag
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    labels: [dependencies, security]
+
+  # --- GitHub Actions -------------------------------------------------------
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+    labels: [dependencies]
+
+  # --- Terraform providers + community modules ------------------------------
+  - package-ecosystem: terraform
+    directory: /infra/terraform/modules/refarch-stack
+    schedule: { interval: weekly }
+    labels: [dependencies]
+  - package-ecosystem: terraform
+    directory: /infra/terraform/envs/dev
+    schedule: { interval: weekly }
+    labels: [dependencies]
+  - package-ecosystem: terraform
+    directory: /infra/terraform/envs/scale
+    schedule: { interval: weekly }
+    labels: [dependencies]
+  - package-ecosystem: terraform
+    directory: /infra/terraform/envs/account-baseline
+    schedule: { interval: weekly }
+    labels: [dependencies]

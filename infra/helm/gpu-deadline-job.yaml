@@ -1,0 +1,39 @@
+# Per-run in-cluster cost belt. Sleeps DEADLINE_SECONDS then scales vllm to 0 —
+# fully in-cluster, independent of any laptop. This is the PRIMARY per-run cost
+# guard (the nightly dead-man is the global belt; the eval Job self-releases on
+# normal completion). Submitted fresh per run by the launcher. Uses gpu-off SA.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gpu-deadline
+  namespace: default
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      serviceAccountName: gpu-off
+      restartPolicy: Never
+      containers:
+        - name: deadline
+          image: python:3.12-slim
+          command:
+            - python3
+            - -c
+            - |
+              import json, os, ssl, time, urllib.request
+              time.sleep(int(os.environ.get("DEADLINE_SECONDS", "21600")))  # default 6h
+              sa = "/var/run/secrets/kubernetes.io/serviceaccount"
+              tok = open(sa + "/token").read()
+              ctx = ssl.create_default_context(cafile=sa + "/ca.crt")
+              req = urllib.request.Request(
+                  "https://kubernetes.default.svc/apis/apps/v1/namespaces/default/deployments/vllm/scale",
+                  data=json.dumps({"spec": {"replicas": 0}}).encode(),
+                  headers={"Authorization": "Bearer " + tok, "Content-Type": "application/merge-patch+json"},
+                  method="PATCH")
+              print("deadline reached -> scaled vllm to 0:",
+                    urllib.request.urlopen(req, context=ctx, timeout=30).status)
+          env:
+            - { name: DEADLINE_SECONDS, value: "21600" } # 6h: covers 547GB download + eval
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }

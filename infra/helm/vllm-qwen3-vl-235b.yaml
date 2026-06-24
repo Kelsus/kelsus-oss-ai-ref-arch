@@ -1,0 +1,87 @@
+# vLLM serving — Qwen3-VL-235B-A22B-Instruct-FP8 (the refreshed vision+text default,
+# replacing Qwen2.5-VL). Apples-to-apples partner for Bedrock's qwen.qwen3-vl-235b-a22b.
+# ~471GB FP8 -> fits one 8xH100 box (640GB) with room for KV cache.
+#
+# RECIPE (verify against the card + vLLM recipe BEFORE the paid run — SE-19):
+#   * Qwen/Qwen3-VL-235B-A22B-Instruct-FP8  (Apache-2.0; not gated)
+#   * vLLM with Qwen3-VL vision support — needs a RECENT build (>=0.11.x). PIN the
+#     exact tag from https://docs.vllm.ai/projects/recipes/en/latest/Qwen/Qwen3-VL.html
+#     and confirm it serves the FP8 checkpoint on H100 before committing GPU time.
+#   * --enable-expert-parallel REQUIRED at TP=8: FP8 block-quant MoE (block_n=128)
+#     isn't divisible at TP=8 without it (SE-11, same as Qwen3-235B-FP8).
+#   * --limit-mm-per-prompt video=0 — we only send images; saves multimodal memory.
+# Refs: QwenLM/Qwen3-VL#1684 (8xA100 OOM -> use H100), vLLM Qwen3-VL recipe.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: default
+  labels: { app: vllm }
+spec:
+  replicas: 1
+  strategy: { type: Recreate } # single accelerator set (SE-4)
+  selector: { matchLabels: { app: vllm } }
+  template:
+    metadata: { labels: { app: vllm } }
+    spec:
+      enableServiceLinks: false # VLLM_PORT collision (SE-3)
+      nodeSelector: { nvidia.com/gpu.present: "true" }
+      tolerations:
+        - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.23.0 # known-good on this cluster (judge runs v0.23.0); Qwen3-VL FP8 supported
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              # Verified recipe (vLLM Qwen3-VL guide + QwenLM/Qwen3-VL#1684): TP=8 needs
+              # --enable-expert-parallel (experts don't shard evenly otherwise, SE-11);
+              # --mm-encoder-tp-mode data + --async-scheduling are the recipe's H100 settings;
+              # --limit-mm-per-prompt video=0 = images only (saves multimodal memory).
+              exec vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct-FP8 \
+                --served-model-name local \
+                --tensor-parallel-size 8 \
+                --enable-expert-parallel \
+                --mm-encoder-tp-mode data \
+                --async-scheduling \
+                --limit-mm-per-prompt '{"image":2,"video":0}' \
+                --gpu-memory-utilization 0.9 \
+                --max-model-len 32768 \
+                --max-num-seqs 64 \
+                --trust-remote-code \
+                --host 0.0.0.0 --port 8000
+          ports: [ { containerPort: 8000 } ]
+          env:
+            - { name: HF_HOME, value: /data/hf }
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef: { name: hf-token, key: token, optional: true }
+          resources:
+            requests: { cpu: "32", memory: 256Gi }
+            limits: { nvidia.com/gpu: 8 } # forces the 8-GPU H100 NodePool
+          startupProbe: # generous: ~471GB download + load + capture
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 20
+            failureThreshold: 240
+          readinessProbe: # tolerant (SE-17): a busy engine must not flap out of endpoints
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 30
+          volumeMounts:
+            - { name: hf-cache, mountPath: /data/hf }
+            - { name: dshm, mountPath: /dev/shm }
+      volumes:
+        - name: hf-cache
+          emptyDir: { sizeLimit: 520Gi }
+        - name: dshm
+          emptyDir: { medium: Memory, sizeLimit: 32Gi }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: vllm, namespace: default }
+spec:
+  selector: { app: vllm }
+  ports: [ { name: http, port: 8000, targetPort: 8000 } ]
+  type: ClusterIP # internal only (ADR-0001)

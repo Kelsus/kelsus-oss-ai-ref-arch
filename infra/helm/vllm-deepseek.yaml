@@ -1,0 +1,86 @@
+# vLLM serving — DeepSeek-V3.1-AWQ, built to the QUANTIZER'S OWN recipe.
+# Every prior attempt failed because we ran this quant on vllm:latest with
+# --enable-expert-parallel — a config the model card and vLLM issue tracker both
+# document as broken under load. QuantTrio's recipe (verbatim) is:
+#   * vLLM 0.9.2 (NOT latest/0.10.1.1 — "glitches"; NOT 0.9.0 — numerical error)
+#   * transformers==4.53.0
+#   * two patch files (awq_marlin.py, deepseek_v2.py) copied into the vllm pkg
+#   * TP=8, gpu-memory-utilization 0.8, swap-space 16, max-num-seqs 512
+#   * NO expert parallelism
+# Refs: huggingface.co/QuantTrio/DeepSeek-V3.1-AWQ ; vLLM issues #43648, #28887.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: default
+  labels: { app: vllm }
+spec:
+  replicas: 1
+  strategy: { type: Recreate } # single accelerator set (SE-4)
+  selector: { matchLabels: { app: vllm } }
+  template:
+    metadata: { labels: { app: vllm } }
+    spec:
+      enableServiceLinks: false # VLLM_PORT collision (SE-3)
+      nodeSelector: { nvidia.com/gpu.present: "true" }
+      tolerations:
+        - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.9.2 # PINNED — the quantizer's required version
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              echo "==> pinning transformers + applying QuantTrio patches"
+              pip install --no-cache-dir -q "transformers==4.53.0"
+              REPO="https://huggingface.co/QuantTrio/DeepSeek-V3.1-AWQ/resolve/main"
+              AUTH=(); [ -n "${HF_TOKEN:-}" ] && AUTH=(-H "Authorization: Bearer $HF_TOKEN")
+              SP=$(pip -V | awk '{print $4}' | sed 's#/pip$##')
+              curl -fsSL "${AUTH[@]}" "$REPO/awq_marlin.py"  -o "$SP/vllm/model_executor/layers/quantization/awq_marlin.py"
+              curl -fsSL "${AUTH[@]}" "$REPO/deepseek_v2.py" -o "$SP/vllm/model_executor/models/deepseek_v2.py"
+              echo "==> patches applied; starting vLLM 0.9.2 (TP=8, util 0.8, NO expert-parallel)"
+              exec vllm serve QuantTrio/DeepSeek-V3.1-AWQ \
+                --served-model-name local \
+                --tensor-parallel-size 8 \
+                --gpu-memory-utilization 0.8 \
+                --swap-space 16 \
+                --max-num-seqs 512 \
+                --max-model-len 32768 \
+                --max-seq-len-to-capture 32768 \
+                --trust-remote-code \
+                --host 0.0.0.0 --port 8000
+          ports: [ { containerPort: 8000 } ]
+          env:
+            - { name: HF_HOME, value: /data/hf }
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef: { name: hf-token, key: token, optional: true }
+          resources:
+            requests: { cpu: "32", memory: 256Gi }
+            limits: { nvidia.com/gpu: 8 } # forces the gpu-h100 NodePool (8-GPU)
+          startupProbe: # ~50min: download 380GB + pip + patches + load + capture
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 20
+            failureThreshold: 240
+          readinessProbe: # tolerant (SE-17): a busy engine must not flap out of endpoints
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 30
+          volumeMounts:
+            - { name: hf-cache, mountPath: /data/hf }
+            - { name: dshm, mountPath: /dev/shm }
+      volumes:
+        - name: hf-cache
+          emptyDir: { sizeLimit: 420Gi }
+        - name: dshm
+          emptyDir: { medium: Memory, sizeLimit: 32Gi }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: vllm, namespace: default }
+spec:
+  selector: { app: vllm }
+  ports: [ { name: http, port: 8000, targetPort: 8000 } ]
+  type: ClusterIP # internal only (ADR-0001)

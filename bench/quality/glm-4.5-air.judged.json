@@ -1,0 +1,13 @@
+{
+  "model": "glm-4.5-air",
+  "accuracy_pct": 36.4,
+  "ci_pct": [
+    30.7,
+    42.5
+  ],
+  "n": 250,
+  "judge": {
+    "url": "http://127.0.0.1:8000/v1",
+    "model": "local"
+  }
+}

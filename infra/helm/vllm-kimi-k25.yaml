@@ -1,0 +1,87 @@
+# vLLM serving — Kimi-K2.5 (moonshotai/Kimi-K2.5), the apples-to-apples partner for
+# Bedrock's moonshotai.kimi-k2.5. SINGLE-BOX, not multi-node: K2.5's only public
+# release is NATIVE INT4 (compressed-tensors, ~595GB) — Moonshot ships it quantized by
+# design (QAT, same method as Kimi-K2-Thinking), so the 1T model fits one 8xH200 box.
+# (The earlier multi-node draft, vllm-kimi-k25-multinode.yaml, assumed a full-precision
+#  1TB release that does not exist. Kept only as reference.)
+#
+# RECIPE (verified at source before the run — SE-19):
+#   * moonshotai/Kimi-K2.5  (Modified MIT; public; architecture KimiK25ForConditionalGeneration)
+#   * Served on our PINNED stable vLLM v0.23.0 — confirmed in the v0.23.0 registry:
+#       KimiK25ForConditionalGeneration -> kimi_k25 ; reasoning parser kimi_k2 present.
+#     (Moonshot's deploy guide says "nightly" but it is 5 months stale; v0.23.0 carries it.)
+#   * Thinking mode is ON by default -> --reasoning-parser kimi_k2 splits reasoning_content
+#     from the answer; the gateway coalesces content->reasoning_content (SE-23).
+#   * --mm-encoder-tp-mode data: K2.5 is multimodal; the eval runs text-only tiers
+#     (clean-digital + RAG, matching the Bedrock kimi run) but the vision tower still loads.
+#   * tool-call-parser omitted on purpose — the harness does not use tool calling.
+#   * MUST land on 8xH200 (1,128GB): 595GB weights do NOT fit 8xH100 (640GB) with KV headroom.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: default
+  labels: { app: vllm }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: vllm } }
+  template:
+    metadata: { labels: { app: vllm } }
+    spec:
+      enableServiceLinks: false
+      # Pin the H200 box (1,128GB) — an H100 box (640GB) would OOM on the 595GB weights.
+      nodeSelector: { node.kubernetes.io/instance-type: p5e.48xlarge }
+      tolerations:
+        - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.23.0
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              exec vllm serve moonshotai/Kimi-K2.5 \
+                --served-model-name local \
+                --tensor-parallel-size 8 \
+                --reasoning-parser kimi_k2 \
+                --mm-encoder-tp-mode data \
+                --gpu-memory-utilization 0.9 \
+                --max-model-len 32768 \
+                --max-num-seqs 32 \
+                --trust-remote-code \
+                --host 0.0.0.0 --port 8000
+          ports: [ { containerPort: 8000 } ]
+          env:
+            - { name: HF_HOME, value: /data/hf }
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef: { name: hf-token, key: token, optional: true }
+          resources:
+            requests: { cpu: "32", memory: 512Gi }
+            limits: { nvidia.com/gpu: 8 }
+          startupProbe: # very generous: ~595GB INT4 download + load on a 1T MoE
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 20
+            failureThreshold: 360   # ~2h ceiling
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 30
+          volumeMounts:
+            - { name: hf-cache, mountPath: /data/hf }
+            - { name: dshm, mountPath: /dev/shm }
+      volumes:
+        - name: hf-cache
+          emptyDir: { sizeLimit: 700Gi }   # p5e has ~27TB local ephemeral; holds the 595GB pull
+        - name: dshm
+          emptyDir: { medium: Memory, sizeLimit: 32Gi }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: vllm, namespace: default }
+spec:
+  selector: { app: vllm }
+  ports: [ { name: http, port: 8000, targetPort: 8000 } ]
+  type: ClusterIP

@@ -1,0 +1,45 @@
+# H200 capacity for Kimi-K2 (~1T MoE, INT4 w4a16 ~500GB). 8×H200 = 1,128GB gives
+# comfortable KV headroom vs 8×H100's 640GB (the tight-fit OOM risk we hit on
+# DeepSeek). On spot, p5en ≈ p5 price (~$18/hr), so headroom is ~free.
+# Dedicated EC2NodeClass: NVMe instance-store (RAID0) backs ephemeral storage so
+# the ~500GB model cache lands on local NVMe (fast, free) not a slow/small EBS.
+# __NODE_ROLE__ / __CLUSTER__ substituted by bench/run-kimi.sh.
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: gpu-h200
+spec:
+  amiSelectorTerms:
+    - alias: al2023@latest # NVIDIA variant resolved for GPU instance types
+  role: __NODE_ROLE__
+  instanceStorePolicy: RAID0 # use the p5en local NVMe for ephemeral/emptyDir
+  subnetSelectorTerms:
+    - tags: { karpenter.sh/discovery: __CLUSTER__ }
+  securityGroupSelectorTerms:
+    - tags: { karpenter.sh/discovery: __CLUSTER__ }
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs: { volumeSize: 120Gi, volumeType: gp3, encrypted: true, deleteOnTermination: true }
+  tags: { Project: kelsus-oss-ai-ref-arch, ManagedBy: karpenter }
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpu-h200
+spec:
+  template:
+    metadata:
+      labels: { workload: inference, tier: h200, nvidia.com/gpu.present: "true" }
+    spec:
+      taints:
+        - { key: nvidia.com/gpu, value: "true", effect: NoSchedule }
+      requirements:
+        - { key: karpenter.sh/capacity-type, operator: In, values: [spot, on-demand] }
+        # Both H200 SKUs — more capacity pools (p5en ICE'd across all AZs; p5e is
+        # a separate pool). Karpenter takes whichever H200 has capacity.
+        - { key: node.kubernetes.io/instance-type, operator: In, values: [p5en.48xlarge, p5e.48xlarge] }
+        - { key: kubernetes.io/arch, operator: In, values: [amd64] }
+      nodeClassRef: { group: karpenter.k8s.aws, kind: EC2NodeClass, name: gpu-h200 }
+      expireAfter: 720h
+  limits: { cpu: "384", memory: 4096Gi } # TWO p5e/p5en nodes — the multi-node LWS (size:2) needs both; cpu:192 caps at one
+  disruption: { consolidationPolicy: WhenEmpty, consolidateAfter: 5m }

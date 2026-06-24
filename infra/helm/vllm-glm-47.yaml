@@ -1,0 +1,80 @@
+# vLLM serving — GLM-4.7-FP8 (355B-A32B MoE), the refreshed successor to GLM-4.5-Air.
+# Apples-to-apples partner for Bedrock's zai.glm-4.7. Official FP8 (~355GB) fits one
+# 8xH100 box (the card lists 8xH100 80GB or 4xH200).
+#
+# RECIPE (verify against the card + vLLM recipe BEFORE the paid run — SE-19):
+#   * zai-org/GLM-4.7-FP8  (MIT; not gated)
+#   * PIN the vLLM version from https://docs.vllm.ai/projects/recipes/en/latest/GLM/GLM.html
+#   * Reasoning model: --reasoning-parser glm45; raise gateway LLM_MAX_TOKENS (>=1024).
+#   * Speculative MTP (--speculative-config ...) is a throughput lever the card
+#     documents; left OFF here for a robust first run — enable it only after a clean
+#     baseline if we want the best tok/s number.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: default
+  labels: { app: vllm }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: vllm } }
+  template:
+    metadata: { labels: { app: vllm } }
+    spec:
+      enableServiceLinks: false
+      nodeSelector: { nvidia.com/gpu.present: "true" }
+      tolerations:
+        - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.23.0 # recent; carries glm47/glm45 parsers. CONFIRM vs the vLLM GLM recipe
+          # FP8 MoE at TP=8: if vLLM errors on uneven expert sharding at boot, add
+          # --enable-expert-parallel (the SE-11 pattern from Qwen3-235B/Qwen3-VL FP8).
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              exec vllm serve zai-org/GLM-4.7-FP8 \
+                --served-model-name local \
+                --tensor-parallel-size 8 \
+                --reasoning-parser glm45 \
+                --gpu-memory-utilization 0.9 \
+                --max-model-len 32768 \
+                --max-num-seqs 64 \
+                --trust-remote-code \
+                --host 0.0.0.0 --port 8000
+          ports: [ { containerPort: 8000 } ]
+          env:
+            - { name: HF_HOME, value: /data/hf }
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef: { name: hf-token, key: token, optional: true }
+          resources:
+            requests: { cpu: "32", memory: 256Gi }
+            limits: { nvidia.com/gpu: 8 }
+          startupProbe: # generous: ~355GB download + load + capture
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 20
+            failureThreshold: 240
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 30
+          volumeMounts:
+            - { name: hf-cache, mountPath: /data/hf }
+            - { name: dshm, mountPath: /dev/shm }
+      volumes:
+        - name: hf-cache
+          emptyDir: { sizeLimit: 400Gi }
+        - name: dshm
+          emptyDir: { medium: Memory, sizeLimit: 32Gi }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: vllm, namespace: default }
+spec:
+  selector: { app: vllm }
+  ports: [ { name: http, port: 8000, targetPort: 8000 } ]
+  type: ClusterIP

@@ -1,0 +1,93 @@
+# vLLM sweep template — rendered by bench/render-vllm.py from env vars
+# (MODEL, TP, GPUS, MAXLEN, CACHE, EXTRA). Do NOT write literal placeholder
+# tokens in comments: the renderer substitutes them anywhere they appear.
+# Same deployment+service names as always, so gateway/scorer wiring holds.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: default
+  labels:
+    app: vllm
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # SE-4
+  selector:
+    matchLabels:
+      app: vllm
+  template:
+    metadata:
+      labels:
+        app: vllm
+    spec:
+      enableServiceLinks: false # SE-3
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest
+          args:
+            - --model
+            - __MODEL__
+            - --served-model-name
+            - local
+            - --tensor-parallel-size
+            - "__TP__"
+            - --max-model-len
+            - "__MAXLEN__"
+            - --gpu-memory-utilization
+            - "0.90"__EXTRA_ARGS_YAML__
+          ports:
+            - containerPort: 8000
+          env:
+            - { name: HF_HOME, value: /data/hf }
+            - name: HF_TOKEN # gated models (e.g. Llama); Secret, never in git
+              valueFrom:
+                secretKeyRef: { name: hf-token, key: token, optional: true }
+          resources:
+            requests:
+              cpu: "16"
+              memory: 96Gi
+            limits:
+              nvidia.com/gpu: __GPUS__
+          startupProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 20
+            failureThreshold: 240 # big downloads: allow ~80 min
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 15
+            timeoutSeconds: 10     # a busy engine answers /health slowly; don't time out at 1s
+            failureThreshold: 30   # ~7.5min of continuous failure = real crash, not load
+            # (SE-17) default probe (1s/3-strike) flapped vLLM out of Service
+            # endpoints under load -> gateway got connection-refused -> 500s.
+          volumeMounts:
+            - { name: hf-cache, mountPath: /data/hf }
+            - { name: dshm, mountPath: /dev/shm }
+      volumes:
+        - name: hf-cache
+          emptyDir:
+            sizeLimit: __CACHE__
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm
+  namespace: default
+spec:
+  selector:
+    app: vllm
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP

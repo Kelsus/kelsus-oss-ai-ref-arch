@@ -1,0 +1,12 @@
+{
+  "model_id": "Qwen/Qwen2.5-VL-72B-Instruct",
+  "served_as": "local",
+  "runtime": "vLLM",
+  "quantization": "none (bf16)",
+  "instance_type": "p4d.24xlarge",
+  "gpu": "8x NVIDIA A100 (320GB)",
+  "tensor_parallel": 8,
+  "region": "us-west-2",
+  "instance_hourly_usd": 11.9892,
+  "price_basis": "SPOT actual at run time, us-west-2b, 2026-06-11 (describe-spot-price-history)"
+}

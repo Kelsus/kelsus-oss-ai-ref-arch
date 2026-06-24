@@ -1,0 +1,78 @@
+# Managed-provider quality Job — a trim of job-quality.yaml for the Bedrock /
+# Anthropic-direct columns. The candidate model lives BEHIND the gateway (set via
+# `kubectl set env deploy/gateway PROVIDER=... *_MODEL_ID=...`), so there is no
+# in-cluster vLLM here: this Job drops the vLLM-health wait and the GPU-release
+# trap entirely. It just scores against the gateway and ships results to S3.
+# Submitted per-model by bench/managed-sweep.sh (substitutes __BUCKET__, the
+# SKIP_/N/TIERS env, and __MODEL_LABEL__ for the result key).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bench-quality-managed
+  namespace: default
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      enableServiceLinks: false
+      restartPolicy: Never
+      serviceAccountName: bench          # S3 read (eval) + write (results); the GATEWAY holds Bedrock IAM
+      initContainers:
+        - name: fetch
+          image: amazon/aws-cli:2.22.35
+          command: ["sh", "-c"]
+          args:
+            - aws s3 sync s3://__BUCKET__/eval /work --only-show-errors && ls /work
+          volumeMounts: [{ name: work, mountPath: /work }]
+      containers:
+        - name: score
+          image: python:3.12-slim
+          workingDir: /work
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -o pipefail
+              pip install --no-cache-dir -q requests psycopg2-binary boto3
+              # No vLLM in the loop — the gateway is always-up CPU. Score straight away.
+              python3 bench/quality/score.py > /work/out.txt 2>&1; RC=$?
+              cat /work/out.txt
+              python3 - "$RC" <<'PY'
+              import boto3, datetime, re, sys
+              rc = int(sys.argv[1])
+              txt = open('/work/out.txt').read()
+              ts = datetime.datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
+              label = "__MODEL_LABEL__"
+              s3 = boto3.client('s3')
+              # Ship the full log first — it must survive pod TTL deletion.
+              s3.put_object(Bucket='__BUCKET__', Key=f'results/logs/managed-{label}-{ts}.txt', Body=txt.encode())
+              print(f'log -> s3://__BUCKET__/results/logs/managed-{label}-{ts}.txt')
+              m = re.search(r'===QUALITY===\s*(\{.*?\})\s*===END===', txt, re.S)
+              if not m:
+                  raise SystemExit('no QUALITY block found — see log above')
+              prefix = '' if rc == 0 else 'INVALID-incomplete-'   # quarantine partial runs
+              key = f'results/quality/managed-{label}-{prefix}{ts}.json'
+              s3.put_object(Bucket='__BUCKET__', Key=key, Body=m.group(1).encode())
+              print(f'result -> s3://__BUCKET__/{key}')
+              if rc != 0:
+                  raise SystemExit(f'run INCOMPLETE (score.py rc={rc}) — quarantined')
+              PY
+          env:
+            - { name: GATEWAY, value: "http://gateway.default.svc:8000" }
+            - { name: WORKERS, value: "__WORKERS__" }
+            - { name: EXTRACT_TIMEOUT, value: "__EXTRACT_TIMEOUT__" }
+            - { name: RAG_TIMEOUT, value: "__RAG_TIMEOUT__" }
+            - { name: "N", value: "__N__" }      # QUOTE: bare N is YAML-bool false
+            - { name: "QN", value: "__QN__" }
+            - { name: RAG_COLLECT, value: "__RAG_COLLECT__" }   # 1 = collect answers for the fixed-judge pass
+            - { name: TIERS, value: "__TIERS__" }
+            - { name: SKIP_COMMERCIAL, value: "__SKIP_COMMERCIAL__" }
+            - { name: SKIP_EXTRACTION, value: "__SKIP_EXTRACTION__" }
+            - { name: SKIP_RAG, value: "__SKIP_RAG__" }   # 1 = commercial/extraction-only (e.g. gold re-score)
+          resources:
+            requests: { cpu: "200m", memory: 768Mi }   # API-bound (SE-5)
+            limits: { memory: 2Gi }
+          volumeMounts: [{ name: work, mountPath: /work }]
+      volumes:
+        - name: work
+          emptyDir: { sizeLimit: 2Gi }

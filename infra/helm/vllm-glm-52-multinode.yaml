@@ -1,0 +1,204 @@
+# GLM-5.2 at full BF16 across two machines — the genuine multi-node serve.
+# 2× p5e/p5en (16× H200) via LeaderWorkerSet + Ray; FLAT TP=16 across both nodes.
+#
+# Canonical manifest — every line here was learned from a real bring-up (2026-06-22).
+# Prereqs (install once per cluster via infra/helm/multinode-prereqs.sh):
+#   * NVIDIA device plugin   (advertises nvidia.com/gpu — NOT bundled in the AMI)
+#   * aws-efa-k8s-device-plugin, patched to tolerate the nvidia.com/gpu taint
+#   * LeaderWorkerSet controller (v0.9.0)
+#   * the gpu-h200 Karpenter NodePool with limits cpu>=384 (TWO p5e nodes)
+# See docs/glm52-multinode-runbook.md for the full sequence + the why behind each fix.
+#
+# THE k_norm FIX = the vLLM IMAGE (see `image:` below), NOT a flag. GLM-5.2's DSA uses
+# IndexShare: only every 4th layer ('full' in config.indexer_types — layers 0,1,2,6,10..74,
+# 21 of them) owns a sparse-attention indexer; the other 57 ('shared') reuse it and store
+# NO indexer weights. vLLM v0.23.0 builds the indexer (incl. k_norm) on EVERY DSA layer
+# regardless, so loading BF16 fails: "weights not initialized from checkpoint:
+# ...indexer.k_norm..." for the 57 shared layers. (FP8 single-box loaded only because that
+# release ships duplicated indexer weights.) Commit #45895 "Indexer init skip" (2026-06-19,
+# four days AFTER the v0.23.0 tag) makes vLLM build the indexer ONLY on non-shared layers,
+# so BF16 loads — we pin the first nightly past that fix and its follow-up #46199. The
+# --hf-overrides index_topk_pattern below is belt-and-suspenders: it states the F/S skip
+# pattern explicitly from indexer_types rather than leaning on vLLM's freq/offset fallback.
+# This is INDEPENDENT of TP/PP — v0.23.0 failed identically at TP=8×PP=2 and at flat TP=16.
+#
+# WHY flat TP=16 (not TP=8 × PP=2): keeps every layer whole on every rank; GLM-5.2 divides
+# cleanly (64 heads/16=4, 256 experts/16=16). Cross-node TP all-reduce rides EFA every
+# layer (heavier than PP, but proven through the full 1.4 TB load). PP=2 is also viable now
+# the k_norm fix is in — a throughput option, not a requirement. __BUCKET__ = model bucket.
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: vllm
+  namespace: default
+  labels: { app: vllm }
+spec:
+  replicas: 1
+  leaderWorkerTemplate:
+    size: 2                          # 1 leader + 1 worker = 2 nodes
+    restartPolicy: RecreateGroupOnPodRestart
+    leaderTemplate:
+      metadata: { labels: { app: vllm, role: leader } }
+      spec:
+        enableServiceLinks: false
+        serviceAccountName: bench    # pod-identity S3 read for the weight pull
+        nodeSelector:
+          nvidia.com/gpu.present: "true"
+          karpenter.sh/nodepool: gpu-h200   # p5e OR p5en (both 8× H200), single-AZ via worker podAffinity
+        tolerations:
+          - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+        containers:
+          - name: vllm-leader
+            image: vllm/vllm-openai:nightly-a346d589f5932d4234bf5bf8718f10e26d187021  # main@2026-06-21: has #45895 indexer-init-skip (NOT in v0.23.0, which can't load GLM-5.2 BF16)
+            command: ["bash", "-c"]   # NOT -lc: the login shell drops the Python bin from PATH
+            args:
+              - |
+                set -uo pipefail        # NOT -e: each step handles its own errors / retries
+                command -v aws >/dev/null 2>&1 || pip install --quiet awscli >/dev/null 2>&1 || true
+                # /models MUST be the big NVMe RAID0 (hostPath), never the ~120 GB root EBS.
+                AVAIL=$(df -BG /models 2>/dev/null | tail -1 | awk '{print $4}' | tr -dc '0-9')
+                if [ "${AVAIL:-0}" -lt 2000 ]; then echo "FATAL: /models has ${AVAIL}G free (<2TB) — wrong hostPath"; sleep 30; exit 1; fi
+                echo "weights dir OK (${AVAIL}G free); syncing (resumes from hostPath if cached)..."
+                ok=0; for i in 1 2 3 4 5 6; do aws s3 sync s3://__BUCKET__/models/glm-5.2-bf16/ /models/glm-5.2 --only-show-errors && { ok=1; break; }; echo "sync attempt $i failed; retry 20s"; sleep 20; done
+                [ "$ok" = 1 ] || { echo "FATAL: weight sync failed"; sleep 20; exit 1; }
+                # Small text/JSON files were staged gzip-compressed (safetensors are raw); decompress in place.
+                for f in /models/glm-5.2/*; do
+                  case "$f" in *.safetensors) continue;; esac
+                  [ -f "$f" ] || continue
+                  if [ "$(od -An -tx1 -N2 "$f" 2>/dev/null | tr -d ' ')" = "1f8b" ]; then
+                    gzip -dc "$f" > "$f.dec" 2>/dev/null && mv "$f.dec" "$f" && echo "decompressed $(basename "$f")"
+                  fi
+                done
+                # Ray must be present + identical on both pods for the cross-node cluster. Keep the
+                # image's bundled ray if it has one (the version the build was tested against);
+                # only install a pinned ray when the image ships none. Same image -> same version.
+                command -v ray >/dev/null 2>&1 || for i in 1 2 3 4; do pip install --quiet ray==2.55.1 && break; echo "ray install retry $i"; sleep 10; done
+                command -v ray >/dev/null 2>&1 || { echo "FATAL: ray not installed"; sleep 20; exit 1; }
+                ray start --head --port=6379 --disable-usage-stats --min-worker-port=10002 --max-worker-port=19999
+                # Wait (bounded) until the cluster reports 16 GPUs. Use `ray status` (CLI) — NOT a
+                # python ray.init() loop, which churns Ray driver sessions and invalidates vLLM's actors.
+                deadline=$(( $(date +%s) + 2400 ))
+                until ray status 2>/dev/null | grep -qE '/16\.0 GPU'; do
+                  if [ "$(date +%s)" -gt "$deadline" ]; then echo "FATAL: <16 GPUs in Ray after 40m"; ray status 2>&1 | tail -20; sleep 20; exit 1; fi
+                  echo "waiting for both nodes (16 GPUs) in Ray..."; sleep 10
+                done
+                echo "Ray cluster has 16 GPUs; starting vLLM (flat TP=16, Ray executor) ..."
+                exec vllm serve /models/glm-5.2 \
+                  --served-model-name local \
+                  --tensor-parallel-size 16 \
+                  --distributed-executor-backend ray \
+                  --reasoning-parser glm45 \
+                  --gpu-memory-utilization 0.86 \
+                  --max-model-len 32768 \
+                  --max-num-seqs 32 \
+                  --trust-remote-code \
+                  --hf-overrides '{"index_topk_pattern": "FFFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSS"}' \
+                  --host 0.0.0.0 --port 8000
+            env:
+              - { name: VLLM_USE_DEEP_GEMM, value: "0" }                                    # Hopper, as for the single-box serves
+              - { name: VLLM_HOST_IP, valueFrom: { fieldRef: { fieldPath: status.podIP } } } # multi-node bind correctness
+              - { name: FI_PROVIDER, value: "efa" }
+              - { name: FI_EFA_USE_DEVICE_RDMA, value: "1" }
+              - { name: NCCL_DEBUG, value: "WARN" }
+              - { name: NCCL_SOCKET_IFNAME, value: "eth0" }
+              - { name: GLOO_SOCKET_IFNAME, value: "eth0" }
+            resources:
+              limits: { nvidia.com/gpu: 8, vpc.amazonaws.com/efa: 16 }   # efa:16 -> p5e(32) AND p5en(16) both qualify
+            ports: [ { containerPort: 8000 }, { containerPort: 6379 } ]
+            startupProbe:                        # generous: first pull (~50m) + cross-node load
+              httpGet: { path: /health, port: 8000 }
+              periodSeconds: 30
+              failureThreshold: 200               # ~100 min
+            readinessProbe:
+              httpGet: { path: /health, port: 8000 }
+              periodSeconds: 15
+              timeoutSeconds: 10
+              failureThreshold: 30
+            volumeMounts:
+              - { name: models, mountPath: /models }
+              - { name: dshm, mountPath: /dev/shm }
+        volumes:
+          - name: models                          # node NVMe RAID0; SURVIVES pod restart -> no 1.4 TB re-pull on a crash
+            hostPath: { path: /var/lib/kubelet/glm-5.2-weights, type: DirectoryOrCreate }
+          - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 256Gi } }   # NCCL shm for 8× H200/node
+    workerTemplate:
+      metadata: { labels: { app: vllm, role: worker } }
+      spec:
+        enableServiceLinks: false
+        serviceAccountName: bench
+        nodeSelector:
+          nvidia.com/gpu.present: "true"
+          karpenter.sh/nodepool: gpu-h200
+        tolerations:
+          - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+        affinity:
+          podAffinity:                            # co-locate worker in the leader's AZ — EFA is single-AZ
+            requiredDuringSchedulingIgnoredDuringExecution:
+              - labelSelector: { matchLabels: { app: vllm } }
+                topologyKey: topology.kubernetes.io/zone
+        containers:
+          - name: vllm-worker
+            image: vllm/vllm-openai:nightly-a346d589f5932d4234bf5bf8718f10e26d187021  # main@2026-06-21: has #45895 indexer-init-skip (NOT in v0.23.0, which can't load GLM-5.2 BF16)
+            command: ["bash", "-c"]
+            args:
+              - |
+                set -uo pipefail
+                command -v aws >/dev/null 2>&1 || pip install --quiet awscli >/dev/null 2>&1 || true
+                AVAIL=$(df -BG /models 2>/dev/null | tail -1 | awk '{print $4}' | tr -dc '0-9')
+                if [ "${AVAIL:-0}" -lt 2000 ]; then echo "FATAL: /models has ${AVAIL}G free (<2TB)"; sleep 30; exit 1; fi
+                ok=0; for i in 1 2 3 4 5 6; do aws s3 sync s3://__BUCKET__/models/glm-5.2-bf16/ /models/glm-5.2 --only-show-errors && { ok=1; break; }; echo "sync attempt $i failed; retry 20s"; sleep 20; done
+                [ "$ok" = 1 ] || { echo "FATAL: weight sync failed"; sleep 20; exit 1; }
+                for f in /models/glm-5.2/*; do
+                  case "$f" in *.safetensors) continue;; esac
+                  [ -f "$f" ] || continue
+                  if [ "$(od -An -tx1 -N2 "$f" 2>/dev/null | tr -d ' ')" = "1f8b" ]; then gzip -dc "$f" > "$f.dec" 2>/dev/null && mv "$f.dec" "$f"; fi
+                done
+                : "${LWS_LEADER_ADDRESS:?LWS_LEADER_ADDRESS not set by LWS}"
+                command -v ray >/dev/null 2>&1 || for i in 1 2 3 4; do pip install --quiet ray==2.55.1 && break; echo "ray install retry $i"; sleep 10; done
+                command -v ray >/dev/null 2>&1 || { echo "FATAL: ray not installed"; sleep 20; exit 1; }
+                # ray start --block blocks while connected; exits non-zero if the head isn't up yet -> retry.
+                for i in $(seq 1 90); do
+                  echo "joining Ray head ${LWS_LEADER_ADDRESS}:6379 (attempt $i)..."
+                  ray start --address="${LWS_LEADER_ADDRESS}:6379" --block --min-worker-port=10002 --max-worker-port=19999
+                  echo "ray worker exited; retry in 10s"; sleep 10
+                done
+            env:
+              - { name: VLLM_USE_DEEP_GEMM, value: "0" }
+              - { name: VLLM_HOST_IP, valueFrom: { fieldRef: { fieldPath: status.podIP } } }
+              - { name: FI_PROVIDER, value: "efa" }
+              - { name: FI_EFA_USE_DEVICE_RDMA, value: "1" }
+              - { name: NCCL_DEBUG, value: "WARN" }
+              - { name: NCCL_SOCKET_IFNAME, value: "eth0" }
+              - { name: GLOO_SOCKET_IFNAME, value: "eth0" }
+            resources:
+              limits: { nvidia.com/gpu: 8, vpc.amazonaws.com/efa: 16 }
+            volumeMounts:
+              - { name: models, mountPath: /models }
+              - { name: dshm, mountPath: /dev/shm }
+        volumes:
+          - name: models
+            hostPath: { path: /var/lib/kubelet/glm-5.2-weights, type: DirectoryOrCreate }
+          - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 256Gi } }
+---
+# Headless service named after the LWS: provides the per-pod DNS (vllm-0.vllm.default)
+# that LWS_LEADER_ADDRESS resolves to. publishNotReadyAddresses=true is REQUIRED — the
+# leader is not Ready until vLLM serves, which can't happen until the worker joins.
+apiVersion: v1
+kind: Service
+metadata: { name: vllm, namespace: default, labels: { app: vllm } }
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector: { app: vllm }
+  ports:
+    - { name: ray, port: 6379, targetPort: 6379 }
+    - { name: http, port: 8000, targetPort: 8000 }
+---
+# Stable ClusterIP for the OpenAI endpoint (leader only) — the gateway/eval target (vllm-api:8000).
+apiVersion: v1
+kind: Service
+metadata: { name: vllm-api, namespace: default, labels: { app: vllm } }
+spec:
+  selector: { app: vllm, role: leader }
+  ports: [ { name: http, port: 8000, targetPort: 8000 } ]
+  type: ClusterIP

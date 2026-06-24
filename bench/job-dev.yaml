@@ -1,0 +1,37 @@
+# In-cluster load-test Job. Runs bench/loadgen.py (mounted from a ConfigMap)
+# against the internal vLLM service, so latency reflects the real serving path
+# (not a laptop port-forward). Created/managed by bench/run.sh.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bench
+  namespace: default
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 1800
+  template:
+    spec:
+      enableServiceLinks: false
+      restartPolicy: Never
+      # May run on the GPU node's spare CPU (small CPU nodes saturate, SE-5).
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: loadgen
+          image: python:3.12-slim
+          command: ["python3", "/bench/loadgen.py"]
+          env:
+            - { name: ENDPOINT, value: "http://vllm:8000/v1" }
+            - { name: MODEL, value: "local" }
+            - { name: CONCURRENCIES, value: "1,8,32,64" }
+            - { name: MAX_TOKENS, value: "256" }
+          resources:
+            requests: { cpu: "250m", memory: 512Mi }
+            limits: { memory: 1Gi }
+          volumeMounts:
+            - { name: code, mountPath: /bench }
+      volumes:
+        - name: code
+          configMap: { name: bench-loadgen }

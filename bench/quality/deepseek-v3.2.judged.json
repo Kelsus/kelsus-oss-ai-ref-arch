@@ -1,0 +1,13 @@
+{
+  "model": "deepseek-v3.2",
+  "accuracy_pct": 34.8,
+  "ci_pct": [
+    29.2,
+    40.9
+  ],
+  "n": 250,
+  "judge": {
+    "url": "http://127.0.0.1:18003/v1",
+    "model": "local"
+  }
+}

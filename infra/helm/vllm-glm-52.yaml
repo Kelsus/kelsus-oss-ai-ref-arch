@@ -1,0 +1,77 @@
+# vLLM serving — GLM-5.2 (zai-org/GLM-5.2-FP8), the newest flagship open model (Z.ai,
+# June 2026; MIT; ~753B MoE, DSA sparse attention, 78 layers, 1M context).
+# Self-hosted addition to the lineup. Bedrock has a near-twin (zai.glm-5 — note: 5, not 5.2),
+# so this is "newest open model on our stack", not a strict same-weights pair.
+#
+# Servable on PINNED stable v0.23.0: arch GlmMoeDsaForCausalLM is in the registry
+# (maps to the deepseek_v2 / DSA impl — same path that served DeepSeek-V3.2). FP8 ~756GB
+# fits one 8xH200 box (does NOT fit H100's 640GB -> pin gpu-h200). Reasoning model:
+# --reasoning-parser glm45 (proven on v0.23.0 for GLM-4.7); gateway coalesces null content (SE-23).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: default
+  labels: { app: vllm }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: vllm } }
+  template:
+    metadata: { labels: { app: vllm } }
+    spec:
+      enableServiceLinks: false
+      nodeSelector: { karpenter.sh/nodepool: gpu-h200 }   # 756GB FP8 needs >640GB (H100)
+      tolerations:
+        - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.23.0
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              exec vllm serve zai-org/GLM-5.2-FP8 \
+                --served-model-name local \
+                --tensor-parallel-size 8 \
+                --reasoning-parser glm45 \
+                --gpu-memory-utilization 0.9 \
+                --max-model-len 32768 \
+                --max-num-seqs 32 \
+                --trust-remote-code \
+                --host 0.0.0.0 --port 8000
+          ports: [ { containerPort: 8000 } ]
+          env:
+            - { name: HF_HOME, value: /data/hf }
+            - { name: VLLM_USE_DEEP_GEMM, value: "0" }   # Hopper guidance (DSA, as for DeepSeek-V3.2)
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef: { name: hf-token, key: token, optional: true }
+          resources:
+            requests: { cpu: "32", memory: 512Gi }
+            limits: { nvidia.com/gpu: 8 }
+          startupProbe:        # ~756GB FP8 download + load
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 20
+            failureThreshold: 300
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 30
+          volumeMounts:
+            - { name: hf-cache, mountPath: /data/hf }
+            - { name: dshm, mountPath: /dev/shm }
+      volumes:
+        - name: hf-cache
+          emptyDir: { sizeLimit: 900Gi }
+        - name: dshm
+          emptyDir: { medium: Memory, sizeLimit: 32Gi }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: vllm, namespace: default }
+spec:
+  selector: { app: vllm }
+  ports: [ { name: http, port: 8000, targetPort: 8000 } ]
+  type: ClusterIP

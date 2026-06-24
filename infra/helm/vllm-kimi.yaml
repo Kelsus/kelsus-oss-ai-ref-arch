@@ -1,0 +1,78 @@
+# vLLM serving — Kimi-K2-Instruct, RedHat w4a16 (INT4) on 8×H200.
+# Recipe per RedHatAI/Kimi-K2-Instruct-quantized.w4a16 (validated vLLM 0.10.0):
+#   vllm serve --tensor-parallel-size 8 --max-model-len 32768 --enforce-eager
+# compressed-tensors is vLLM-NATIVE — no patch files (unlike DeepSeek/SE-19).
+# Pinned to H200 (p5en) via nodeSelector so it gets the 1,128GB headroom, not a
+# tight 640GB H100. Same deploy/service names as always -> gateway/scorer hold.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: default
+  labels: { app: vllm }
+spec:
+  replicas: 1
+  strategy: { type: Recreate } # SE-4
+  selector: { matchLabels: { app: vllm } }
+  template:
+    metadata: { labels: { app: vllm } }
+    spec:
+      enableServiceLinks: false # SE-3
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+        tier: h200 # any H200 (p5en OR p5e) from the gpu-h200 pool, never H100
+      tolerations:
+        - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.10.0 # PINNED — RedHat-validated for this quant
+          # Kimi K2's tiktoken-based tokenizer (tokenization_kimi.py) needs `blobfile`
+          # to read its BPE vocab; the stock image omits it -> ImportError at tokenizer
+          # load, AFTER the 547GB download, crashlooping forever (SE-21). Install it
+          # first, then exec the server (override entrypoint to wrap the pip install).
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              pip install --no-cache-dir blobfile && \
+              exec python3 -m vllm.entrypoints.openai.api_server \
+                --model RedHatAI/Kimi-K2-Instruct-quantized.w4a16 \
+                --served-model-name local \
+                --tensor-parallel-size 8 \
+                --max-model-len 32768 \
+                --enforce-eager \
+                --gpu-memory-utilization 0.90 \
+                --trust-remote-code
+          ports: [ { containerPort: 8000 } ]
+          env:
+            - { name: HF_HOME, value: /data/hf }
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef: { name: hf-token, key: token, optional: true }
+          resources:
+            requests: { cpu: "32", memory: 512Gi }
+            limits: { nvidia.com/gpu: 8 }
+          startupProbe: # 547GB download + load: allow ~3h (first attempt timed out ~100min)
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 20
+            failureThreshold: 540
+          readinessProbe: # tolerant (SE-17): busy engine must not flap out of endpoints
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 30
+          volumeMounts:
+            - { name: hf-cache, mountPath: /data/hf }
+            - { name: dshm, mountPath: /dev/shm }
+      volumes:
+        - name: hf-cache
+          emptyDir: { sizeLimit: 800Gi } # on NVMe instance-store (gpu-h200 nodeclass)
+        - name: dshm
+          emptyDir: { medium: Memory, sizeLimit: 32Gi }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: vllm, namespace: default }
+spec:
+  selector: { app: vllm }
+  ports: [ { name: http, port: 8000, targetPort: 8000 } ]
+  type: ClusterIP # internal only (ADR-0001)

@@ -1,0 +1,70 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraform.lock.hcl
+
+# Secrets / local config
+*.tfvars
+!example.tfvars
+.env
+.env.*
+*.pem
+kubeconfig*
+.aws-sso-cache/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+
+# Data — generated/synthetic artifacts are reproducible; don't commit bulk
+data/**/output/
+data/**/raw/
+data/**/*.pdf
+data/**/*.parquet
+data/synthea/synthea/
+data/synthea/synthea-with-dependencies.jar
+data/gold/**/*.json
+data/corpus/seed/
+*.zip
+
+# Bench outputs (raw CSVs are published deliberately, not auto-committed)
+bench/reports/runs/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local tool settings
+.claude/settings.local.json
+
+# stray redirect artifacts
+/1
+/2
+bench/reports/sweeps/
+bench/reports/quality/
+bench/quality/eval_manifest.jsonl
+data/fatura/gold/
+data/fatura/output/
+bench/quality/eval_manifest_commercial.jsonl
+
+# local preview server config
+.claude/launch.json

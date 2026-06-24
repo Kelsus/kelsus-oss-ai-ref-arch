@@ -1,0 +1,13 @@
+{
+  "model": "sonnet-4.6-bedrock",
+  "accuracy_pct": 24.6,
+  "ci_pct": [
+    19.7,
+    30.3
+  ],
+  "n": 248,
+  "judge": {
+    "url": "http://127.0.0.1:18003/v1",
+    "model": "local"
+  }
+}

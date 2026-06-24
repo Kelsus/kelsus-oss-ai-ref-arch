@@ -1,0 +1,31 @@
+# In-cluster throughput/latency load test against the live vLLM endpoint.
+# Reuses bench/loadgen.py (stdlib-only) via a configmap. Submit AFTER the model's
+# vLLM is Ready; reads peak tok/s from the pod log (===SUMMARY===...===END===).
+# Driver: scale up a vllm-<model>.yaml -> wait Ready -> apply this -> read log ->
+# postprocess.py with the spot $/hr -> scale vllm to 0.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: loadgen
+  namespace: default
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      enableServiceLinks: false
+      containers:
+        - name: loadgen
+          image: python:3.12-slim
+          command: ["python", "/script/loadgen.py"]
+          env:
+            - { name: ENDPOINT, value: "http://vllm.default.svc:8000/v1" }
+            - { name: MODEL, value: "local" }
+            - { name: CONCURRENCIES, value: "1,8,32,64" }
+            - { name: MAX_TOKENS, value: "256" }
+          volumeMounts:
+            - { name: script, mountPath: /script }
+      volumes:
+        - name: script
+          configMap: { name: loadgen-script }

@@ -1,0 +1,195 @@
+# Capacity poller for the GLM-5.2 multi-node serve. Autonomous (in-cluster, pod-identity —
+# no laptop/SSO), $0 while idle. Every 20 min it reads AWS's spot placement score for a
+# 2× H200 SINGLE-AZ pair in us-west-2 and only ARMS the serve when that score is high
+# enough (>=7) that both nodes are likely to land together — so it never wastes money
+# landing a lone leader while the second node ICEs. When armed, the LWS dead-man
+# (lws-deadman.yaml) bounds the serve. The serve manifest lives in the glm-manifest
+# ConfigMap (the canonical vllm-glm-52-multinode.yaml, bucket-substituted).
+#
+# Tune: the score threshold (>=7) in the args below (lower = more eager, more lone-leader
+# risk). Pause: kubectl patch cronjob glm-poller -p '{"spec":{"suspend":true}}'. Disarm a
+# running serve: kubectl delete lws vllm. Cost backstop: lws-deadman.yaml (lone-leader 15m abort).
+#
+# A companion WATCHDOG (bottom of this file) guards the poller's OWN liveness — a CronJob can
+# silently stop firing (an accidental suspend, or the controller falling behind on schedules),
+# and this surfaces that instead of letting a dead hunt look like a quiet, working one.
+#
+# One-time IAM prereq (pod-identity role for ec2:GetSpotPlacementScores), created out-of-band
+# this session — fold into infra/terraform/modules/refarch-stack alongside the bench/gateway roles:
+#   aws iam create-role --role-name <CLUSTER>-poller-pod --assume-role-policy-document \
+#     '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"pods.eks.amazonaws.com"},"Action":["sts:AssumeRole","sts:TagSession"]}]}'
+#   aws iam put-role-policy --role-name <CLUSTER>-poller-pod --policy-name spot-placement-scores \
+#     --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["ec2:GetSpotPlacementScores"],"Resource":"*"}]}'
+#   aws eks create-pod-identity-association --cluster-name <CLUSTER> --namespace default \
+#     --service-account glm-poller --role-arn arn:aws:iam::<ACCT>:role/<CLUSTER>-poller-pod
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: glm-poller, namespace: default }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: glm-poller }
+rules:
+  - apiGroups: ["leaderworkerset.x-k8s.io"]
+    resources: ["leaderworkersets"]
+    verbs: ["get", "list", "create", "patch", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["services", "pods"]
+    verbs: ["get", "list", "create", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: glm-poller }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: glm-poller }
+subjects:
+  - { kind: ServiceAccount, name: glm-poller, namespace: default }
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata: { name: glm-poller, namespace: default }
+spec:
+  schedule: "*/20 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 180
+      backoffLimit: 1
+      template:
+        spec:
+          serviceAccountName: glm-poller
+          restartPolicy: Never
+          containers:
+            - name: poller
+              image: alpine/k8s:1.31.4   # bundles kubectl + aws-cli
+              command: ["sh", "-c"]
+              args:
+                - |
+                  set -u
+                  if kubectl get lws vllm -n default >/dev/null 2>&1; then
+                    # Serve already exists. If it's Ready and not yet smoke-tested, prove it
+                    # generates — the BF16 multi-node serve IS the deliverable, so capture one real
+                    # completion in this job's log + stamp the LWS, autonomously, even if it came up
+                    # unattended. The 3h dead-man is the teardown runway; this grabs the proof first.
+                    READY=$(kubectl get pod vllm-0 -n default -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+                    SMOKED=$(kubectl get lws vllm -n default -o jsonpath='{.metadata.annotations.glm\.kelsus/smoked}' 2>/dev/null || true)
+                    if [ "$READY" = "True" ] && [ -z "$SMOKED" ]; then
+                      echo ">> serve READY and un-smoked — smoke-testing vllm-api:8000"
+                      echo "MODELS: $(curl -sS --max-time 30 http://vllm-api:8000/v1/models 2>&1 || true)"
+                      OUT=$(curl -sS --max-time 120 http://vllm-api:8000/v1/chat/completions \
+                        -H 'Content-Type: application/json' \
+                        -d '{"model":"local","messages":[{"role":"user","content":"In one sentence, what is a reference architecture?"}],"max_tokens":64,"temperature":0}' 2>&1 || true)
+                      echo "SMOKE RESPONSE: $OUT"
+                      kubectl annotate lws vllm -n default "glm.kelsus/smoked=$(date -u +%FT%TZ)" --overwrite >/dev/null 2>&1 || true
+                      echo ">> smoke captured + LWS stamped (glm.kelsus/smoked). Full RAG eval = manual, watched."
+                    else
+                      echo "LWS present (ready=${READY:-no}, smoked=${SMOKED:-no}) — leaving it (dead-man guards cost). idle."
+                    fi
+                    exit 0
+                  fi
+                  SCORE=$(aws ec2 get-spot-placement-scores \
+                    --instance-types p5en.48xlarge p5e.48xlarge \
+                    --target-capacity 2 --target-capacity-unit-type units \
+                    --single-availability-zone --region-names us-west-2 --region us-west-2 \
+                    --query 'max_by(SpotPlacementScores, &Score).Score' --output text 2>/dev/null)
+                  echo "us-west-2 2-node single-AZ H200 spot score: ${SCORE:-unknown}  (arm threshold: 7)"
+                  if [ "${SCORE:-0}" -ge 7 ] 2>/dev/null; then
+                    echo ">> capacity likely — ARMING the GLM-5.2 multi-node serve"
+                    kubectl apply -f /manifest/lws.yaml
+                  else
+                    echo "<< below threshold — staying idle (\$0)"
+                  fi
+              volumeMounts:
+                - { name: manifest, mountPath: /manifest }
+          volumes:
+            - name: manifest
+              configMap: { name: glm-manifest }
+---
+# ──────────────────────────────────────────────────────────────────────────────
+# WATCHDOG — liveness guard for the poller above.
+#
+# Why this exists: a CronJob can quietly stop firing (an accidental suspend, or the
+# controller falling behind on missed schedules) with nothing to show for it — a 4–7 h
+# poller stall once went unnoticed because "armed" was assumed to mean "checking". This
+# runs every 10 min (more often than the poller's 20) and, UNLESS the poller is
+# deliberately suspended, flags it STALLED when its lastScheduleTime is >25 min old.
+#
+# It writes a queryable verdict onto the poller — annotation `glm.kelsus/liveness` =
+# `healthy` | `paused` | `STALLED` + timestamp — so a single read answers "is it really
+# hunting?":   kubectl get cronjob glm-poller -o jsonpath='{.metadata.annotations.glm\.kelsus/liveness}'
+# On a real stall it also bridges the gap by kicking ONE manual poller run (label
+# glm.kelsus/recover=glm-poller, replaced each time) so the hunt never goes fully dark.
+# Pure Kubernetes API — no AWS, no laptop. It never un-suspends the poller: a deliberate
+# pause is respected, not fought.
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: glm-poller-watchdog, namespace: default }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: glm-poller-watchdog }
+rules:
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "list", "patch"]          # read schedule status + stamp the liveness verdict
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "create", "delete", "patch"]   # kick + label + replace the bridge run
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: glm-poller-watchdog }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: glm-poller-watchdog }
+subjects:
+  - { kind: ServiceAccount, name: glm-poller-watchdog, namespace: default }
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata: { name: glm-poller-watchdog, namespace: default }
+spec:
+  schedule: "*/10 * * * *"            # checks more often than the poller fires (*/20)
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 60        # bounded so it can't wedge its own schedule under Forbid
+      backoffLimit: 1
+      template:
+        spec:
+          serviceAccountName: glm-poller-watchdog
+          restartPolicy: Never
+          containers:
+            - name: watchdog
+              image: gcr.io/cloud-builders/kubectl:latest   # Debian: GNU `date -d` to parse RFC3339 (no AWS needed)
+              command: ["bash", "-c"]
+              args:
+                - |
+                  set -u
+                  CJ=glm-poller; NS=default; STALL_MIN=25
+                  NOW=$(date -u +%s)
+                  SUS=$(kubectl get cronjob "$CJ" -n "$NS" -o jsonpath='{.spec.suspend}' 2>/dev/null || true)
+                  LAST=$(kubectl get cronjob "$CJ" -n "$NS" -o jsonpath='{.status.lastScheduleTime}' 2>/dev/null || true)
+                  stamp() { kubectl annotate cronjob "$CJ" -n "$NS" "glm.kelsus/liveness=$1" --overwrite >/dev/null 2>&1 || true; }
+                  # A deliberate pause is not a stall — never fight an intentional suspend.
+                  if [ "$SUS" = "true" ]; then
+                    echo "poller deliberately suspended — not a stall."; stamp "paused $(date -u +%FT%TZ)"; exit 0
+                  fi
+                  # Freshly created, not yet scheduled — give it a cycle.
+                  if [ -z "$LAST" ]; then echo "poller has no lastScheduleTime yet — skipping."; exit 0; fi
+                  AGE=$(( (NOW - $(date -u -d "$LAST" +%s)) / 60 ))
+                  echo "poller last scheduled ${AGE}m ago (lastScheduleTime=$LAST); stall threshold=${STALL_MIN}m"
+                  if [ "$AGE" -le "$STALL_MIN" ]; then
+                    stamp "healthy ${AGE}m-ago $(date -u +%FT%TZ)"; exit 0
+                  fi
+                  # STALLED: active but not firing. Surface loudly + queryably, then bridge with one manual run.
+                  echo "ALERT: poller NOT scheduled for ${AGE}m (>${STALL_MIN}m) and not suspended — STALLED."
+                  stamp "STALLED ${AGE}m $(date -u +%FT%TZ)"
+                  kubectl delete job -n "$NS" -l glm.kelsus/recover=glm-poller --ignore-not-found >/dev/null 2>&1 || true
+                  RJ="glm-poller-recover-$(date -u +%H%M%S)"
+                  if kubectl create job -n "$NS" --from="cronjob/$CJ" "$RJ" >/dev/null 2>&1; then
+                    kubectl label job -n "$NS" "$RJ" glm.kelsus/recover=glm-poller >/dev/null 2>&1 || true
+                    echo "bridged the stall with one manual poller run ($RJ)."
+                  fi
+                  exit 0
