@@ -30,8 +30,9 @@ rules:
     resources: ["leaderworkersets"]
     verbs: ["get", "list", "delete"]
   - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list"]
+    resources: ["pods", "nodes"]    # nodes: REQUIRED for the node-age guard (NMIN). Without it
+    verbs: ["get", "list"]          # `kubectl get node` is forbidden, NMIN falls back to 0, and
+                                    # the lone-leader / not-ready aborts silently never fire.
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -79,6 +80,7 @@ spec:
                   # pod threshold — once hid a ~6h/$250 burn. The GPU node persists across group-
                   # restarts within one bring-up, so its creationTimestamp is the true clock.
                   NCT=$(kubectl get node "$NODE" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null || true)
+                  [ -z "$NCT" ] && echo "WARN: cannot read node $NODE age (nodes RBAC?) — age guards DISABLED this run"
                   NMIN=$(( (NOW - $(date -u -d "${NCT:-$(date -u +%FT%TZ)}" +%s)) / 60 ))
                   # Lone-leader burn: leader on a GPU node but the worker isn't scheduled (2nd node
                   # not landing) -> abort fast (node >=15m) so the poller re-evaluates, not a 3h burn.
