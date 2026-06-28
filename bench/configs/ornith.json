@@ -1,0 +1,12 @@
+{
+  "model_id": "deepreinforce-ai/Ornith-1.0-397B",
+  "served_as": "local",
+  "runtime": "vLLM",
+  "quantization": "none (bf16)",
+  "instance_type": "p5en.48xlarge",
+  "gpu": "8x NVIDIA H200 (1128GB)",
+  "tensor_parallel": 8,
+  "region": "us-west-2",
+  "instance_hourly_usd": 19.4202,
+  "price_basis": "SPOT actual at run time, us-west-2d, 2026-06-27 (describe-spot-price-history)"
+}

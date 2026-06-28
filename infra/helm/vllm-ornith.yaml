@@ -1,0 +1,106 @@
+# vLLM serving — Ornith-1.0-397B (deepreinforce-ai/Ornith-1.0-397B): a brand-new
+# 397B MoE (qwen3_5_moe: 512 experts, 10 active), multimodal (vision+text), and a
+# reasoning model (emits <think>...</think>). MIT, open, not gated. Self-host only
+# (not on Bedrock), so this is a Layer-A self-hosted row with no same-weights twin.
+#
+# BEST VERSION = BF16 (native). The "9 quantized" variants on the card are consumer
+# GGUF/Ollama builds, not serving-grade, so we serve the full-precision checkpoint.
+# BF16 is ~794GB:
+#   * one 8xH200 box (p5e/p5en, 1,128GB) fits it with ~334GB headroom for KV cache.
+#   * H100 (640GB) will NOT fit -> gpu-h200 nodepool. SINGLE-BOX (TP=8), no multi-node
+#     and no LWS, so the lws-deadman does not apply here. The nightly-off CronJob and
+#     `make gpu-off` are the cost guards, same as the other single-box scale serves.
+#
+# vLLM SUPPORT (verified at source — the GLM-5.2 lesson, do not trust the card alone):
+#   * v0.23.0's registry carries "Qwen3_5MoeForConditionalGeneration" -> module qwen3_5,
+#     so the BF16 checkpoint serves on our PINNED stable. No nightly (unlike GLM-5.2).
+#   * card recipe: vLLM >=0.19.1, --tensor-parallel-size 8, --reasoning-parser qwen3.
+#
+# SMOKE-TEST BEFORE THE FULL EVAL (SE-19, the only residual unknowns):
+#   * 1 real vision completion (a document image) returns parseable JSON;
+#   * --reasoning-parser qwen3 strips the <think> block so the extraction JSON / RAG
+#     answer is the visible content (gateway coalesces null content, SE-23). Set the
+#     harness LLM_MAX_TOKENS high: a low ceiling truncates the answer behind the
+#     reasoning (the GLM-5.2 lesson).
+#   * the card also lists --tool-call-parser qwen3_xml for agentic tool-use; add it
+#     (with --enable-auto-tool-choice) ONLY if the claims-intake agentic runs need
+#     native tool-calls. Extraction + RAG do not.
+#   * optional throughput tuning (verify if added): --enable-expert-parallel and
+#     --mm-encoder-tp-mode data (the Qwen3-VL recipe). 512 experts divide evenly at
+#     TP=8, so EP is not required for the BF16 checkpoint.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: default
+  labels: { app: vllm }
+spec:
+  replicas: 1
+  strategy: { type: Recreate } # single accelerator set (SE-4)
+  selector: { matchLabels: { app: vllm } }
+  template:
+    metadata: { labels: { app: vllm } }
+    spec:
+      enableServiceLinks: false # VLLM_PORT collision (SE-3)
+      # Target the H200 NODEPOOL (p5e/p5en, 1,128GB): 794GB BF16 needs >640GB (H100).
+      # Pin the nodepool, not one instance type, so Karpenter can fall back
+      # p5e<->p5en when spot capacity for one is exhausted (UnfulfillableCapacity).
+      nodeSelector: { karpenter.sh/nodepool: gpu-h200 }
+      tolerations:
+        - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.23.0 # registry carries Qwen3_5MoeForConditionalGeneration
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              # Multimodal reasoning MoE: --reasoning-parser qwen3 (card recipe);
+              # --limit-mm-per-prompt image-only (we send document images, never video,
+              # which saves multimodal memory); --async-scheduling is the Qwen vision
+              # recipe perf setting; --max-num-seqs 32 bounds KV for a long-CoT model.
+              exec vllm serve deepreinforce-ai/Ornith-1.0-397B \
+                --served-model-name local \
+                --tensor-parallel-size 8 \
+                --reasoning-parser qwen3 \
+                --limit-mm-per-prompt '{"image":2,"video":0}' \
+                --async-scheduling \
+                --gpu-memory-utilization 0.9 \
+                --max-model-len 32768 \
+                --max-num-seqs 32 \
+                --trust-remote-code \
+                --host 0.0.0.0 --port 8000
+          ports: [ { containerPort: 8000 } ]
+          env:
+            - { name: HF_HOME, value: /data/hf }
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef: { name: hf-token, key: token, optional: true }
+          resources:
+            requests: { cpu: "32", memory: 512Gi }
+            limits: { nvidia.com/gpu: 8 } # forces the 8-GPU H200 node
+          startupProbe: # generous: ~794GB BF16 download + load + capture
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 20
+            failureThreshold: 360   # ~2h ceiling
+          readinessProbe: # tolerant (SE-17): a busy engine must not flap out of endpoints
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 30
+          volumeMounts:
+            - { name: hf-cache, mountPath: /data/hf }
+            - { name: dshm, mountPath: /dev/shm }
+      volumes:
+        - name: hf-cache
+          emptyDir: { sizeLimit: 900Gi }   # p5e local NVMe holds the 794GB pull
+        - name: dshm
+          emptyDir: { medium: Memory, sizeLimit: 32Gi }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: vllm, namespace: default }
+spec:
+  selector: { app: vllm }
+  ports: [ { name: http, port: 8000, targetPort: 8000 } ]
+  type: ClusterIP # internal only (ADR-0001)

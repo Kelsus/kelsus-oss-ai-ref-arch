@@ -1,0 +1,13 @@
+{
+  "model": "ornith",
+  "accuracy_pct": 35.2,
+  "ci_pct": [
+    29.5,
+    41.3
+  ],
+  "n": 250,
+  "judge": {
+    "url": "http://localhost:18000/v1",
+    "model": "local"
+  }
+}

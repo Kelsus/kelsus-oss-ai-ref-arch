@@ -1,6 +1,6 @@
 # Same-weights comparison — sovereign self-hosted vs. Bedrock vs. the frontier
 
-**Status: COMPLETE 2026-06-20 — five self-hosted models + all managed (Bedrock + Anthropic): extraction, RAG (fixed-judged), commercial (corrected 5-field gold), and self-hosted throughput + $/M-out all measured. Same-weights calibration holds on every axis — Scout, the exact-weights pair, matches Bedrock on all three. UPDATED 2026-06-22: added the GLM-5 family — GLM-5.2 self-hosted (97.0% extraction / 33.2% RAG) + GLM-5 on Bedrock (96.1% / 30.8%), the newest open flagship and top-of-lineup on extraction (footnote ⁸: a family addition, not a strict same-weights pair).**
+**Status: COMPLETE 2026-06-20 — five self-hosted models + all managed (Bedrock + Anthropic): extraction, RAG (fixed-judged), commercial (corrected 5-field gold), and self-hosted throughput + $/M-out all measured. Same-weights calibration holds on every axis — Scout, the exact-weights pair, matches Bedrock on all three. UPDATED 2026-06-22: added the GLM-5 family — GLM-5.2 self-hosted (97.0% extraction / 33.2% RAG) + GLM-5 on Bedrock (96.1% / 30.8%), the newest open flagship and top-of-lineup on extraction (footnote ⁸: a family addition, not a strict same-weights pair). UPDATED 2026-06-27: added Ornith-1.0-397B (deepreinforce-ai), self-hosted only with no Bedrock twin — a 397B vision+reasoning MoE that ties the frontier on medical-degraded extraction (96.3%), lands top-of-cluster on RAG (35.2%), and self-hosts at $1.99/M-out (footnote ⁹).**
 
 ## What this is
 
@@ -95,11 +95,12 @@ see Pricing basis.
 ## Layer A — sovereign self-hosted (COMPLETE)
 
 The apples-to-apples partner for each Layer-B row, re-run on our stack (current-gen weights, same
-harness). Fills in after the GPU windows:
+harness). Ornith-1.0-397B is the exception — a self-hosted-only open model with no Bedrock twin, reported as a standalone data point (footnote ⁹). Fills in after the GPU windows:
 
 | Model | Self-host config | med-deg F1 | com-deg F1 | RAG | $/M out |
 |---|---|--:|--:|--:|--:|
 | Qwen3-VL-235B | FP8, 8×H200 TP=8 | **95.0%** | **83.7%** | 28.8% [23.5, 34.7] | $1.30 (H200)⁷ |
+| Ornith-1.0-397B⁹ | BF16, 8×H200 TP=8 | **96.3%** | 81.0% | 35.2% [29.5, 41.3] | $1.99 (H200)⁷ |
 | Kimi-K2.5 (text) | INT4, 8×H200 TP=8⁶ | — | — | **37.6%** [31.8, 43.7] | $2.18 (H200)⁷ |
 | GLM-4.7 (text) | FP8, 8×H100 TP=8 | — | — | 36.8% [31.1, 42.9] | $1.27 (H100)⁷ |
 | GLM-5.2 (text)⁸ | FP8, 8×H200 TP=8 | — | — | 33.2% [27.7, 39.3] | $3.69 (H200)⁷ |
@@ -117,7 +118,7 @@ INT4 (~595 GB), DeepSeek-V3.2 official FP8 (~685 GB) — both fit the 1,128 GB. 
 "Kimi full-precision multi-node" / "DeepSeek nightly-vLLM + AWQ" plans were unnecessary (premised on
 640 GB H100 sizing and a stale Sept-2025 recipe); v0.23.0 carries `DeepseekV32` + DSA natively.
 ⁷ Self-hosted $/M-out = peak aggregate tok/s (64-concurrent `loadgen`) ÷ measured spot $/hr. **Peak
-tok/s:** Qwen3-VL 3,838 · GLM-4.7 3,120 · Kimi-K2.5 2,295 · DeepSeek-V3.2 1,403 · GLM-5.2 1,357 (Scout 3,927, from the
+tok/s:** Qwen3-VL 3,838 · GLM-4.7 3,120 · Ornith 2,710 · Kimi-K2.5 2,295 · DeepSeek-V3.2 1,403 · GLM-5.2 1,357 (Scout 3,927, from the
 scale-sweep). **Spot $/hr:** 8×H100 (`p5.48xlarge`) $14.22; 8×H200 (`p5e.48xlarge`) ~$18 —
 **shortage-elevated 2026-06-19** (typical ~$14; re-priced at $14 the H200 rows drop ~22%: Qwen3-VL
 →$1.01, Kimi→$1.70, DeepSeek→$2.77). Point-in-time spot at **peak** utilization (best case); real-world
@@ -133,6 +134,21 @@ ceiling truncating the JSON behind its reasoning, *not* a quality result; fixed 
 p95 is a long 24.7 s (thinking tail). GLM-5.2 self-hosted throughput is **1,357 tok/s → $3.69/M** (H200,
 ~$18 spot) — the priciest self-host in the lineup, the reasoning-model tax (it's the slowest, just past
 DeepSeek-V3.2).
+
+⁹ **Ornith-1.0-397B (deepreinforce-ai, added 2026-06-27).** A 397B `qwen3_5_moe` MoE (512 experts,
+10 active), multimodal and a reasoning model (emits `<think>`), MIT-licensed, served BF16 (~794 GB)
+single-box on one 8×H200 box, TP=8, pinned vLLM v0.23.0 — its registry carries
+`Qwen3_5MoeForConditionalGeneration` natively, so no nightly (unlike GLM-5.2). **Self-hosted only:
+not on Bedrock, so no same-weights twin** — a standalone open-model data point, not a calibration
+pair. Full vision tiers ran: medical clean/scanned/degraded **97.1/97.1/96.3%**, commercial
+clean/degraded **98.3/81.0%**. On medical-degraded it ties the frontier (96.3% vs Opus 96.4%) and
+leads the open vision models (Qwen3-VL 95.0%, Scout 84.6%); on commercial-degraded it sits between
+them (81.0%, vs Qwen3-VL 83.7% / Scout 72.3%), so the ~13-pt frontier commercial-degraded premium
+holds. RAG **35.2%** [29.5, 41.3] lands top-of-cluster (Kimi 37.6, GLM-4.7 36.8, DeepSeek 34.8).
+Throughput **2,710 tok/s → $1.99/M-out** at $19.42 spot (`p5en.48xlarge`, us-west-2d, 2026-06-27):
+a reasoning model, but more throughput-efficient than DeepSeek-V3.2 (1,403 tok/s) and GLM-5.2
+(1,357), so cheaper per token despite the reasoning. `LLM_MAX_TOKENS=16,384`, thinking left on
+(consistent with the lineup).
 
 The sanity check that proves the comparison is fair: each Layer-A score should land close to its
 Layer-B partner (same weights). A gap means a serving/precision difference worth explaining.
