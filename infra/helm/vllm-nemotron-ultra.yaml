@@ -1,0 +1,96 @@
+# vLLM serving — NVIDIA Nemotron-3-Ultra-550B-A55B in NVFP4 on one 8xH100 box.
+#
+# WHY this serves on Hopper despite NVFP4 being a Blackwell format: vLLM loads NVFP4
+# weights on H100/H200 via the Marlin FP4 SOFTWARE fallback — it gets the memory win
+# (the ~310 GB FP4 build fits 8xH100's 640 GB) but NOT the FP4 tensor-core speedup, so
+# throughput lands around FP8 level. That sidesteps both the H200 drought (this serves on
+# H100, spot score 9 in az2) and the multi-node BF16 serve (~1.1 TB) the full-precision
+# build would need. The $/M we measure is therefore a Hopper-NVFP4 number; a Blackwell
+# box would be faster and cheaper — state that when publishing.
+#
+# Nemotron-3-Ultra is a HYBRID Mamba-2 + Transformer + MoE (model_type nemotron_h,
+# NemotronHForCausalLM): 560B total / 55B active, 512 experts / 22 per token, plus Mamba
+# mixer layers (SSM state cache, not KV) and shared experts. vLLM v0.23.0's registry
+# carries NemotronHForCausalLM + the Mamba kernels.
+#
+# SMOKE-TEST BEFORE THE FULL EVAL (SE-19 — several first-time unknowns stacked here):
+#   * the NVFP4 (modelopt) quant loads on H100 via Marlin FP4 — if v0.23.0 errors on it
+#     (an older vLLM failed on H100 NVFP4: HF nvidia/Gemma-4-31B-IT-NVFP4 #7), pin a
+#     recent nightly with the Marlin-FP4 fix;
+#   * the Mamba mixer layers run (use_mamba_kernels) and the hybrid serves at TP=8;
+#   * reasoning mode: Nemotron toggles "detailed thinking on/off" via the SYSTEM prompt.
+#     Serve raw first, read the smoke output — if it emits a <think> block add the matching
+#     --reasoning-parser and raise the gateway LLM_MAX_TOKENS; if it is concise by default,
+#     benchmark that and note the mode in the writeup.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: default
+  labels: { app: vllm }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }   # single accelerator set (SE-4)
+  selector: { matchLabels: { app: vllm } }
+  template:
+    metadata: { labels: { app: vllm } }
+    spec:
+      enableServiceLinks: false   # VLLM_PORT collision (SE-3)
+      # Pin the H100 nodepool (p5.48xlarge, 8xH100): NVFP4 fits the 640 GB, and H100 spot
+      # is available (score 9, az2) while H200 is in drought. NOT gpu-h200.
+      nodeSelector: { karpenter.sh/nodepool: gpu-h100 }
+      tolerations:
+        - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.23.0   # registry carries NemotronHForCausalLM; NVFP4-Marlin: verify in smoke
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              # NVFP4 quant is auto-detected from the checkpoint's quantization_config
+              # (modelopt/compressed-tensors); on Hopper vLLM selects the Marlin FP4 path.
+              # --max-num-seqs modest: hybrid Mamba state + the slower Marlin-FP4 compute.
+              exec vllm serve nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4 \
+                --served-model-name local \
+                --tensor-parallel-size 8 \
+                --gpu-memory-utilization 0.9 \
+                --max-model-len 32768 \
+                --max-num-seqs 32 \
+                --reasoning-parser deepseek_r1 \
+                --trust-remote-code \
+                --host 0.0.0.0 --port 8000
+          ports: [ { containerPort: 8000 } ]
+          env:
+            - { name: HF_HOME, value: /data/hf }
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef: { name: hf-token, key: token, optional: true }
+          resources:
+            requests: { cpu: "32", memory: 256Gi }
+            limits: { nvidia.com/gpu: 8 }   # forces the 8-GPU H100 node
+          startupProbe:   # generous: ~310 GB NVFP4 download + load + Mamba/Marlin init
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 20
+            failureThreshold: 300   # ~100 min
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 30
+          volumeMounts:
+            - { name: hf-cache, mountPath: /data/hf }
+            - { name: dshm, mountPath: /dev/shm }
+      volumes:
+        - name: hf-cache
+          emptyDir: { sizeLimit: 450Gi }   # p5 NVMe holds the ~310 GB NVFP4 pull
+        - name: dshm
+          emptyDir: { medium: Memory, sizeLimit: 32Gi }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: vllm, namespace: default }
+spec:
+  selector: { app: vllm }
+  ports: [ { name: http, port: 8000, targetPort: 8000 } ]
+  type: ClusterIP   # internal only (ADR-0001)

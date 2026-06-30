@@ -1,6 +1,6 @@
 # Same-weights comparison — sovereign self-hosted vs. Bedrock vs. the frontier
 
-**Status: COMPLETE 2026-06-20 — five self-hosted models + all managed (Bedrock + Anthropic): extraction, RAG (fixed-judged), commercial (corrected 5-field gold), and self-hosted throughput + $/M-out all measured. Same-weights calibration holds on every axis — Scout, the exact-weights pair, matches Bedrock on all three. UPDATED 2026-06-22: added the GLM-5 family — GLM-5.2 self-hosted (97.0% extraction / 33.2% RAG) + GLM-5 on Bedrock (96.1% / 30.8%), the newest open flagship and top-of-lineup on extraction (footnote ⁸: a family addition, not a strict same-weights pair). UPDATED 2026-06-27: added Ornith-1.0-397B (deepreinforce-ai), self-hosted only with no Bedrock twin — a 397B vision+reasoning MoE that ties the frontier on medical-degraded extraction (96.3%), lands top-of-cluster on RAG (35.2%), and self-hosts at $1.99/M-out (footnote ⁹).**
+**Status: COMPLETE 2026-06-20 — five self-hosted models + all managed (Bedrock + Anthropic): extraction, RAG (fixed-judged), commercial (corrected 5-field gold), and self-hosted throughput + $/M-out all measured. Same-weights calibration holds on every axis — Scout, the exact-weights pair, matches Bedrock on all three. UPDATED 2026-06-22: added the GLM-5 family — GLM-5.2 self-hosted (97.0% extraction / 33.2% RAG) + GLM-5 on Bedrock (96.1% / 30.8%), the newest open flagship and top-of-lineup on extraction (footnote ⁸: a family addition, not a strict same-weights pair). UPDATED 2026-06-27: added Ornith-1.0-397B (deepreinforce-ai), self-hosted only with no Bedrock twin — a 397B vision+reasoning MoE that ties the frontier on medical-degraded extraction (96.3%), lands top-of-cluster on RAG (35.2%), and self-hosts at $1.99/M-out (footnote ⁹). UPDATED 2026-06-29: added Nemotron-3-Ultra-550B-A55B (NVIDIA), self-hosted only — a 560B hybrid Mamba-MoE served NVFP4 on 8×H100 via the Marlin FP4 fallback; clean-digital extraction 96.3%, RAG 36.4% (top-of-cluster), $1.96/M-out (footnote ¹⁰).**
 
 ## What this is
 
@@ -95,7 +95,7 @@ see Pricing basis.
 ## Layer A — sovereign self-hosted (COMPLETE)
 
 The apples-to-apples partner for each Layer-B row, re-run on our stack (current-gen weights, same
-harness). Ornith-1.0-397B is the exception — a self-hosted-only open model with no Bedrock twin, reported as a standalone data point (footnote ⁹). Fills in after the GPU windows:
+harness). Ornith-1.0-397B and Nemotron-3-Ultra-550B are the exceptions — self-hosted-only open models with no Bedrock twin, reported as standalone data points (footnotes ⁹, ¹⁰). Fills in after the GPU windows:
 
 | Model | Self-host config | med-deg F1 | com-deg F1 | RAG | $/M out |
 |---|---|--:|--:|--:|--:|
@@ -105,6 +105,7 @@ harness). Ornith-1.0-397B is the exception — a self-hosted-only open model wit
 | GLM-4.7 (text) | FP8, 8×H100 TP=8 | — | — | 36.8% [31.1, 42.9] | $1.27 (H100)⁷ |
 | GLM-5.2 (text)⁸ | FP8, 8×H200 TP=8 | — | — | 33.2% [27.7, 39.3] | $3.69 (H200)⁷ |
 | DeepSeek-V3.2 (text) | FP8, 8×H200 TP=8⁶ | — | — | **34.8%** [29.2, 40.9] | $3.56 (H200)⁷ |
+| Nemotron-3-Ultra-550B (text)¹⁰ | NVFP4, 8×H100 TP=8 | — | — | 36.4% [30.7, 42.5] | $1.96 (H100)⁷ |
 | Llama-4-Scout | BF16, 8×H100 TP=8 (exact match) | 84.6% | 72.3%⁴ | 25.2% [20.2, 30.9] | $1.01 (H100)⁵ |
 
 ⁴ Scout's self-hosted com-deg, re-scored on the corrected 5-field gold (2026-06-20): **72.3%**
@@ -112,13 +113,13 @@ harness). Ornith-1.0-397B is the exception — a self-hosted-only open model wit
 axes for the exact-same-weights pair: med-deg 84.6 vs 84.7, com-deg 72.3 vs 71.7, RAG 25.2 vs 24.8.
 ⁵ Scout $/M-out from the scale-sweep at peak utilization (8×H100 `p5.48xlarge` spot). Text-model
 clean-digital extraction F1 (their headline tier; vision/degraded not run): **Kimi-K2.5 97.2%**,
-**GLM-4.7 95.8%**, **DeepSeek-V3.2 95.2%**.
+**GLM-4.7 95.8%**, **DeepSeek-V3.2 95.2%**, **Nemotron-3-Ultra 96.3%**.
 ⁶ Both serve **single-box on one 8×H200 box** under pinned stable vLLM v0.23.0: Kimi-K2.5 is native
 INT4 (~595 GB), DeepSeek-V3.2 official FP8 (~685 GB) — both fit the 1,128 GB. The earlier
 "Kimi full-precision multi-node" / "DeepSeek nightly-vLLM + AWQ" plans were unnecessary (premised on
 640 GB H100 sizing and a stale Sept-2025 recipe); v0.23.0 carries `DeepseekV32` + DSA natively.
 ⁷ Self-hosted $/M-out = peak aggregate tok/s (64-concurrent `loadgen`) ÷ measured spot $/hr. **Peak
-tok/s:** Qwen3-VL 3,838 · GLM-4.7 3,120 · Ornith 2,710 · Kimi-K2.5 2,295 · DeepSeek-V3.2 1,403 · GLM-5.2 1,357 (Scout 3,927, from the
+tok/s:** Qwen3-VL 3,838 · GLM-4.7 3,120 · Ornith 2,710 · Kimi-K2.5 2,295 · Nemotron 2,006 · DeepSeek-V3.2 1,403 · GLM-5.2 1,357 (Scout 3,927, from the
 scale-sweep). **Spot $/hr:** 8×H100 (`p5.48xlarge`) $14.22; 8×H200 (`p5e.48xlarge`) ~$18 —
 **shortage-elevated 2026-06-19** (typical ~$14; re-priced at $14 the H200 rows drop ~22%: Qwen3-VL
 →$1.01, Kimi→$1.70, DeepSeek→$2.77). Point-in-time spot at **peak** utilization (best case); real-world
@@ -149,6 +150,19 @@ Throughput **2,710 tok/s → $1.99/M-out** at $19.42 spot (`p5en.48xlarge`, us-w
 a reasoning model, but more throughput-efficient than DeepSeek-V3.2 (1,403 tok/s) and GLM-5.2
 (1,357), so cheaper per token despite the reasoning. `LLM_MAX_TOKENS=16,384`, thinking left on
 (consistent with the lineup).
+
+¹⁰ **Nemotron-3-Ultra-550B-A55B (NVIDIA, added 2026-06-29).** A 560B hybrid Mamba-2 + Transformer +
+MoE (`nemotron_h` / `NemotronHForCausalLM`: 512 experts / 22 per token, ~55B active), text-only and a
+reasoning model (reasons by default; `--reasoning-parser deepseek_r1` strips the `<think>` block so the
+extraction JSON is clean). **Self-hosted only** — not on Bedrock, a standalone data point with no
+same-weights twin. Served **NVFP4 (~310 GB) single-box on one 8×H100 box, TP=8**, via vLLM's **Marlin
+FP4 software fallback**: NVFP4 is hardware-accelerated only on Blackwell, but Hopper loads it for the
+memory win (no FP4 speedup, ~FP8 throughput), which sidesteps both the H200 drought and the multi-node
+BF16 serve (~1.1 TB) the full-precision build would need. vLLM v0.23.0 carries `NemotronHForCausalLM`
++ the Mamba kernels — no nightly. Clean-digital extraction **96.3%** [95.0, 97.2]; RAG **36.4%**
+[30.7, 42.5] lands top-of-cluster (just under Kimi 37.6 / GLM-4.7 36.8). Throughput **2,006 tok/s →
+$1.96/M-out** at $14.18 spot (`p5.48xlarge`, us-west-2a): the $/M is a Hopper-NVFP4 number — a
+Blackwell box would be faster and cheaper.
 
 The sanity check that proves the comparison is fair: each Layer-A score should land close to its
 Layer-B partner (same weights). A gap means a serving/precision difference worth explaining.

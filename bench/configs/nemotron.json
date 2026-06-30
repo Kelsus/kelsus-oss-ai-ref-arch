@@ -1,0 +1,12 @@
+{
+  "model_id": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4",
+  "served_as": "local",
+  "runtime": "vLLM",
+  "quantization": "NVFP4 via Marlin FP4 fallback on Hopper (no FP4 accel)",
+  "instance_type": "p5.48xlarge",
+  "gpu": "8x NVIDIA H100 (640GB)",
+  "tensor_parallel": 8,
+  "region": "us-west-2",
+  "instance_hourly_usd": 14.179900,
+  "price_basis": "SPOT actual at run time, us-west-2a, 2026-06-29 (describe-spot-price-history)"
+}

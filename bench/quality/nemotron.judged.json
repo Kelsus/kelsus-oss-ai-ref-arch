@@ -1,0 +1,13 @@
+{
+  "model": "nemotron",
+  "accuracy_pct": 36.4,
+  "ci_pct": [
+    30.7,
+    42.5
+  ],
+  "n": 250,
+  "judge": {
+    "url": "http://localhost:18000/v1",
+    "model": "local"
+  }
+}
