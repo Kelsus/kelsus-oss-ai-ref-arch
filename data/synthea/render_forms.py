@@ -17,6 +17,7 @@ Note:   Synthea procedure codes are SNOMED-CT; map to CPT/HCPCS and diagnoses
         to ICD-10 in a later pass for billing-authentic codes (documented TODO).
 """
 import csv
+import hashlib
 import json
 import random
 import sys
@@ -34,6 +35,29 @@ HERE = Path(__file__).parent
 CSV = HERE / "output" / "csv"
 FORMS = HERE / "output" / "forms"
 GOLD = HERE.parent / "gold" / "claims"
+
+
+def synth_npi(seed):
+    """A standards-valid synthetic NPI, derived deterministically from a provider Id.
+
+    Synthea emits no real NPIs, so earlier builds used the provider's UUID `Id` as a
+    stand-in. That made provider_npi an unfair field: it measured "will you transcribe
+    a UUID", which penalised reasoning models that correctly reject a UUID as an NPI
+    (DeepSeek-V4-Pro nulled it 64% of the time). We instead synthesise a real-format
+    NPI: a 9-digit base (NPIs lead with 1 or 2) plus a Luhn check digit computed over
+    the CMS '80840' prefix + base. Deterministic in `seed` (same provider -> same NPI),
+    so regeneration is stable and the PDF and gold always agree."""
+    h = int(hashlib.sha256(str(seed).encode()).hexdigest(), 16)
+    base = "1" + f"{h % 10**8:08d}"                 # 9 digits, NPI-style leading 1
+    total = 0
+    for i, ch in enumerate(reversed("80840" + base)):
+        d = int(ch)
+        if i % 2 == 0:                              # double the digit left of the (future) check digit
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return base + str((10 - total % 10) % 10)       # 10-digit NPI with Luhn check
 
 # Layout diversity: the SAME claim rendered as different real-world document
 # styles, with synonym labels, varied field order, table headers, and accents.
@@ -176,7 +200,7 @@ def assemble(n):
             "payer": {"name": payer_name},
             "provider": {
                 "name": prov.get("NAME", ""),
-                "npi": prov.get("Id", ""),  # provider Id stands in for NPI
+                "npi": synth_npi(prov.get("Id", "")),  # standards-valid synthetic NPI (was: raw UUID Id)
                 "specialty": prov.get("SPECIALITY", ""),
                 "address": ", ".join(x for x in [prov.get("ADDRESS", ""),
                            prov.get("CITY", ""), prov.get("STATE", ""),

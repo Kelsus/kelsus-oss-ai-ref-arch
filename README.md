@@ -78,12 +78,12 @@ make smoke                 # one request end-to-end, never leaving the VPC
 
 ## Benchmark results
 
-The question this answers is what you give up by self-hosting an open-weight model instead of calling Amazon Bedrock or a frontier model. We measured it on one workload and one harness, holding everything constant except the substrate: the same models served on our vLLM stack, on Bedrock, and (for the frontier) on Anthropic's API. The lineup is the current generation of open weights, Qwen3-VL-235B, Llama-4-Scout, GLM-4.7, Kimi-K2.5, DeepSeek-V3.2, and GLM-5.2, measured beside Claude Opus 4.8 and Sonnet 4.6.
+The question this answers is what you give up by self-hosting an open-weight model instead of calling Amazon Bedrock or a frontier model. We measured it on one workload and one harness, holding everything constant except the substrate: the same models served on our vLLM stack, on Bedrock, and (for the frontier) on Anthropic's API. The lineup is the current generation of open weights, Qwen3-VL-235B, Llama-4-Scout, GLM-4.7, Kimi-K2.5, DeepSeek-V3.2, GLM-5.2, and DeepSeek-V4-Pro (plus self-hosted-only Ornith-1.0-397B and Nemotron-3-Ultra-550B), measured beside Claude Opus 4.8 and Sonnet 4.6.
 
 Three results held across both document extraction and retrieval:
 
 - **The substrate does not change quality.** The same weights scored the same whether we served them or Bedrock did, inside the confidence intervals, on both extraction and RAG. Self-hosting reproduces the managed provider's output on identical inputs.
-- **The frontier's quality lead is confined to hard document extraction.** On degraded scans (skewed, blurred, compressed), Opus leads the best open model by about ten points. On grounded retrieval QA the open models tie the frontier, and that lead does not carry over.
+- **The frontier's quality lead is confined to hard *commercial* document extraction.** On degraded commercial invoices (skewed, blurred, compressed, varied layouts), Opus leads the best open model by about ten points. On medical claims the whole lineup saturates near 99–100% once a gold-data bug is corrected (the `provider_npi` field had stored a UUID instead of a 10-digit NPI; see [the comparison doc](docs/benchmarks/same-weights-comparison.md), Caveat 5), so medical extraction is not a differentiator. On grounded retrieval QA the open models tie the frontier, and that lead does not carry over.
 - **Self-hosting costs less per token at high utilization for most of the lineup.** GLM-4.7 runs about $1.27 per million output tokens self-hosted against $2.20 on Bedrock, and the frontier models cost 8 to 38 times the open-weight options. Reasoning models are the exception: their lower throughput makes self-hosting more expensive than Bedrock.
 
 The full writeup, per-model tables, methods, and confidence intervals are in [`docs/benchmarks/`](docs/benchmarks/).

@@ -124,7 +124,15 @@ def _extract_item(item):
         _err("extract", e)
         return None
     truth = gold_view(json.load(open(os.path.join(GOLD, f"{cid}.json"))))
-    return (item["tier"], [match(f, pred.get(f), truth[f]) for f in FIELDS])
+    row = [match(f, pred.get(f), truth[f]) for f in FIELDS]
+    # Diagnostic: keep what the model ACTUALLY returned for every MISSED field
+    # (pred vs gold), so a low per-field score is auditable instead of a black box
+    # — e.g. is provider_npi wrong because the model prefixed "NPI:", reformatted
+    # the digits, or hallucinated? The eval data is fully synthetic (no real PII).
+    misses = [{"claim_id": cid, "tier": item["tier"], "field": f,
+               "pred": pred.get(f), "gold": truth[f]}
+              for f, ok in zip(FIELDS, row) if not ok]
+    return (item["tier"], row, misses)
 
 
 def _agg(rows):
@@ -154,12 +162,15 @@ def score_extraction():
         res = [r for r in ex.map(_extract_item, items) if r is not None]
     STATS["extraction"] = {"attempted": len(items), "completed": len(res)}
     by_tier = {}
-    for tier, row in res:
+    mismatches = []
+    for tier, row, miss in res:
         by_tier.setdefault(tier, []).append(row)
+        mismatches.extend(miss)
     tiers = {t: _agg(by_tier[t]) for t in by_tier}
     headline = next((t for t in reversed(TIER_ORDER) if t in tiers), None)
     return {"tiers": tiers, "headline_tier": headline,
-            "headline_f1_pct": tiers[headline]["f1_pct"] if headline else None}
+            "headline_f1_pct": tiers[headline]["f1_pct"] if headline else None,
+            "mismatches": mismatches}
 
 
 # --- commercial invoices (FATURA, real layouts) -----------------------------

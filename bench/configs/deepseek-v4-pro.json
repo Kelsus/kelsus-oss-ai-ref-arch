@@ -1,0 +1,12 @@
+{
+  "model_id": "deepseek-ai/DeepSeek-V4-Pro",
+  "served_as": "local",
+  "runtime": "vLLM",
+  "quantization": "native FP4 experts + FP8 attn/router (block 128x128); FP4 expert path via Marlin fallback on Hopper (no FP4 accel)",
+  "instance_type": "p5en.48xlarge",
+  "gpu": "8x NVIDIA H200 (1128GB)",
+  "tensor_parallel": 8,
+  "region": "us-west-2",
+  "instance_hourly_usd": 21.7331,
+  "price_basis": "SPOT actual at run time, us-west-2a, 2026-07-01 (describe-spot-price-history)"
+}

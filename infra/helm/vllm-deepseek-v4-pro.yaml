@@ -1,0 +1,128 @@
+# vLLM serving — DeepSeek-V4-Pro (deepseek-ai/DeepSeek-V4-Pro): the new DeepSeek flagship
+# open model (MIT, April 2026). 1.6T MoE / 49B active, 61 layers, 1M context (YaRN x16
+# over 64k base), hybrid CSA + HCA sparse attention (the V3.2 DSA descendant; the lightning
+# indexer now scores over COMPRESSED entries and dropped to FP4/MXFP4). This is the model
+# the OSS publish has been gated on (ref-arch-delivery-state). Text-only, reasoning.
+#
+# WEIGHTS = the native FP4+FP8 mixed checkpoint (~865GB, 64 shards): MoE expert params are
+# FP4, attention/router/norm stay FP8 (block 128x128). This is the BEST/native version --
+# the nvidia/DeepSeek-V4-Pro-NVFP4 build is actually LARGER (~913GB, it quantizes attention
+# to FP4 too and carries scale tensors), so it is no memory win here; serve the native repo.
+#
+# TOPOLOGY IS FORCED -> single 8xH200 box (TP=8):
+#   * ~865GB does NOT fit 8xH100's 640GB (so the Nemotron H100-NVFP4 escape does NOT apply
+#     to Pro -- it is too big for Hopper-80G boxes). pin gpu-h200 (p5e/p5en, 1,128GB):
+#     865GB weights leave ~150GB for the (compressed CSA/MLA) KV cache at 0.9 util.
+#   * SINGLE-BOX, no LWS / no multi-node (unlike GLM-5.2 BF16 and Kimi-K2.5), so the
+#     lws-deadman does not apply; cost guards are the nightly gpu-off CronJob + `make gpu-off`.
+#   * clean divisibility for TP=8: 128 attention heads, 384 routed experts both /8.
+#
+# vLLM SUPPORT (verify at source before trusting -- the GLM-5.2 lesson):
+#   * official recipe (recipes.vllm.ai/deepseek-ai/DeepSeek-V4-Flash) requires vLLM 0.20.0+;
+#     our pinned stable is v0.23.0, so arch DeepseekV4ForCausalLM SHOULD be in the registry.
+#     BUT the recipe only documents Flash (284B); Pro (1.6T) is first-footed here -- if
+#     v0.23.0 errors on the arch or the FP4/MXFP4 indexer kernels, pin a vLLM nightly
+#     (the GLM-5.2 IndexShare precedent), do NOT assume the card.
+#   * V4-specific flags from the recipe: --tokenizer-mode deepseek_v4,
+#     --reasoning-parser deepseek_v4, --kv-cache-dtype fp8, --trust-remote-code.
+#   * the FP4 expert path on Hopper runs via vLLM's Marlin FP4 fallback (memory win, ~FP8
+#     throughput, no FP4 tensor-core speedup) -- the Nemotron-NVFP4-on-Hopper precedent.
+#     The $/M we measure is a Hopper number; a Blackwell box would be faster/cheaper -- say so.
+#
+# SMOKE-TEST BEFORE THE FULL EVAL (SE-19 -- several first-time unknowns stack here):
+#   * the serve actually loads (arch + FP4/FP8 mixed + 865GB on one box) and generates ONE
+#     completion at TP=8;
+#   * --reasoning-parser deepseek_v4 strips the reasoning so the visible content is the
+#     extraction JSON / RAG answer (gateway coalesces null content, SE-23). Raise the
+#     harness LLM_MAX_TOKENS so the answer clears the reasoning budget (the GLM-5.2
+#     truncation lesson) -- V4-Pro's "Max" mode is high reasoning effort.
+#   * VLLM_USE_DEEP_GEMM=0 is the Hopper guidance for the DSA path (proven for DeepSeek-V3.2
+#     and GLM-5.2); CSA is the DSA descendant, so keep it unless the smoke says otherwise.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: default
+  labels: { app: vllm }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }   # single accelerator set (SE-4)
+  selector: { matchLabels: { app: vllm } }
+  template:
+    metadata: { labels: { app: vllm } }
+    spec:
+      enableServiceLinks: false   # VLLM_PORT collision (SE-3)
+      # Pin the H200 NODEPOOL (p5e/p5en, 1,128GB): 865GB needs >640GB (H100). Pin the
+      # nodepool, not one instance type, so Karpenter can fall back p5e<->p5en on spot
+      # exhaustion (UnfulfillableCapacity). H200 spot is in drought -- expect to wait on
+      # the capacity poller, not a first-apply land.
+      nodeSelector: { karpenter.sh/nodepool: gpu-h200 }
+      tolerations:
+        - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.23.0   # SHOULD carry DeepseekV4ForCausalLM (recipe: 0.20.0+); verify in smoke, else pin a nightly
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              # V4 hybrid CSA+HCA sparse-attention reasoning MoE. The deepseek_v4 tokenizer
+              # and reasoning parser are REQUIRED (recipe); --kv-cache-dtype fp8 keeps the
+              # compressed KV small so 865GB weights + KV fit one box. --max-model-len 32768
+              # matches the lineup (not the 1M ceiling). --max-num-seqs modest: Marlin-FP4
+              # expert compute on Hopper is ~FP8-speed, and long-CoT requests are KV-heavy.
+              # Add --tool-call-parser deepseek_v4 (+ --enable-auto-tool-choice) ONLY if the
+              # agentic claims-intake runs need native tool calls; extraction + RAG do not.
+              exec vllm serve deepseek-ai/DeepSeek-V4-Pro \
+                --served-model-name local \
+                --tensor-parallel-size 8 \
+                --tokenizer-mode deepseek_v4 \
+                --reasoning-parser deepseek_v4 \
+                --kv-cache-dtype fp8 \
+                --gpu-memory-utilization 0.9 \
+                --max-model-len 32768 \
+                --max-num-seqs 32 \
+                --trust-remote-code \
+                --host 0.0.0.0 --port 8000
+          ports: [ { containerPort: 8000 } ]
+          env:
+            - { name: HF_HOME, value: /data/hf }
+            # MUST be 1 for V4-Pro: the checkpoint is ue8m0 block-scaled FP8
+            # (config scale_fmt=ue8m0). With DeepGEMM OFF, vLLM v0.23.0 falls back to the
+            # CUTLASS c3x w8a8 path which cannot dispatch that scale format and dies in KV
+            # profiling: "dispatch_scaled_mm ... scaled_mm_helper.hpp:17". With it ON, vLLM
+            # logs "Detected scale_fmt=ue8m0; enabling UE8M0 for DeepGEMM" and serves.
+            # (This is the OPPOSITE of the DeepSeek-V3.2 / GLM-5.2 Hopper guidance -- verified
+            # live on 8xH200, 2026-06-30.)
+            - { name: VLLM_USE_DEEP_GEMM, value: "1" }
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef: { name: hf-token, key: token, optional: true }
+          resources:
+            requests: { cpu: "32", memory: 512Gi }
+            limits: { nvidia.com/gpu: 8 }   # forces the 8-GPU H200 node
+          startupProbe:        # generous: ~865GB FP4/FP8 download (64 shards) + load + CSA/Marlin init
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 20
+            failureThreshold: 360   # ~2h ceiling
+          readinessProbe:      # tolerant (SE-17): a busy engine must not flap out of endpoints
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 30
+          volumeMounts:
+            - { name: hf-cache, mountPath: /data/hf }
+            - { name: dshm, mountPath: /dev/shm }
+      volumes:
+        - name: hf-cache
+          emptyDir: { sizeLimit: 1000Gi }   # p5e/p5en local NVMe holds the ~865GB pull
+        - name: dshm
+          emptyDir: { medium: Memory, sizeLimit: 32Gi }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: vllm, namespace: default }
+spec:
+  selector: { app: vllm }
+  ports: [ { name: http, port: 8000, targetPort: 8000 } ]
+  type: ClusterIP   # internal only (ADR-0001)
