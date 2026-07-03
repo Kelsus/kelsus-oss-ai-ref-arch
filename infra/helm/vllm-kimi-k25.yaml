@@ -2,8 +2,8 @@
 # Bedrock's moonshotai.kimi-k2.5. SINGLE-BOX, not multi-node: K2.5's only public
 # release is NATIVE INT4 (compressed-tensors, ~595GB) — Moonshot ships it quantized by
 # design (QAT, same method as Kimi-K2-Thinking), so the 1T model fits one 8xH200 box.
-# (The earlier multi-node draft, vllm-kimi-k25-multinode.yaml, assumed a full-precision
-#  1TB release that does not exist. Kept only as reference.)
+# (An earlier multi-node draft assumed a full-precision 1TB release that does not
+#  exist; it was removed 2026-07-03 — single-box INT4 is the only real serving path.)
 #
 # RECIPE (verified at source before the run — SE-19):
 #   * moonshotai/Kimi-K2.5  (Modified MIT; public; architecture KimiK25ForConditionalGeneration)

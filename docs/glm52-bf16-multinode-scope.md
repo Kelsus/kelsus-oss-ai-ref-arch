@@ -38,7 +38,7 @@ It's the only candidate that is all three: real precision, real chat model, real
 2. **EFA device plugin** — `aws-efa-k8s-device-plugin` DaemonSet (tolerate the GPU taint, target p5e).
 3. **p5e single-AZ NodePool + EC2NodeClass** — spot, pinned to one AZ, **EFA interfaces enabled** +
    a **cluster placement group**. (Mirror the `gpu-h200` pool; add ENIs/EFA + placementGroup + single-AZ.)
-   The `vllm-kimi-k25-multinode.yaml` draft + `kimi-multinode-runbook.md` are the skeleton to adapt.
+   `infra/helm/vllm-glm-52-multinode.yaml` + `docs/glm52-multinode-runbook.md` are the in-tree skeleton (the earlier Kimi multi-node draft was removed 2026-07-03 — its full-precision premise was wrong; K2.5 ships INT4-only and serves single-box).
 
 ## Weight staging (the long pole — keep it off the GPU clock)
 ~1.5 TB BF16. Stage `zai-org/GLM-5.2` → `s3://<scale-bucket>/models/glm-5.2-bf16/` once via a CPU Job
