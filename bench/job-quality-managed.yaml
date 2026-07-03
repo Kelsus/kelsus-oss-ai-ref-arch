@@ -11,9 +11,14 @@ metadata:
   name: bench-quality-managed
   namespace: default
 spec:
-  backoffLimit: 0
+  # backoffLimit 2 (was 0): CPU spot nodes churn under AMI drift / reclaim too —
+  # an eviction failed the kimi-k2.5-bedrock collection (2026-07-02). Idempotent scorer.
+  backoffLimit: 2
   ttlSecondsAfterFinished: 86400
   template:
+    metadata:
+      annotations:
+        karpenter.sh/do-not-disrupt: "true"   # see job-quality.yaml (AMI-drift eviction)
     spec:
       enableServiceLinks: false
       restartPolicy: Never

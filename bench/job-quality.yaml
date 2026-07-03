@@ -10,9 +10,28 @@ metadata:
   name: bench-quality
   namespace: default
 spec:
-  backoffLimit: 0
+  # backoffLimit 2 (was 0): a Karpenter node replacement (AMI drift, spot reclaim)
+  # evicts this pod mid-run — with 0 retries that FAILED the whole collection and the
+  # eviction SIGTERM bypassed the release trap (2026-07-01, kimi re-collect). score.py
+  # is idempotent (re-queries), and activeDeadlineSeconds below spans ALL retries.
+  backoffLimit: 2
+  # Runtime ceiling. Without it, a wedged eval (vLLM accepting-but-timing-out, a network
+  # stall in the scorer) stays "active" forever — and gpu-nightly-off deliberately SKIPS
+  # its scale-down while this Job is active, so the belt is disabled exactly when it's
+  # needed: unbounded GPU burn. The SIGKILL at the deadline does bypass the EXIT-trap
+  # release below, but the next nightly pass then fires (job no longer active), bounding
+  # the worst case to <24h instead of forever. 12h covers the slowest full run to date
+  # (reasoning model, 1200s timeouts, WORKERS=2) with ~2x headroom.
+  activeDeadlineSeconds: 43200
   ttlSecondsAfterFinished: 86400
   template:
+    metadata:
+      annotations:
+        # Karpenter must not VOLUNTARILY evict a running eval (AMI-drift node
+        # replacement killed one mid-collect). Involuntary spot reclaim still can —
+        # backoffLimit above covers that. Empty-node consolidation is unaffected
+        # (a finished pod no longer blocks anything).
+        karpenter.sh/do-not-disrupt: "true"
     spec:
       enableServiceLinks: false
       restartPolicy: Never

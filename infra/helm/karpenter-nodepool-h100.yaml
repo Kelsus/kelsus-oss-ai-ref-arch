@@ -1,7 +1,14 @@
 # H100 capacity: p5.48xlarge (8x H100 80GB, 192 vCPU) — the frontier-tier box
-# for 70B+ validation and the DeepSeek/Kimi sweep. SPOT ONLY by decision (Jon):
-# ~50-70% off on-demand, and benchmark batches tolerate interruption. If spot
-# ICEs, we wait (Karpenter retries) rather than silently paying ~$55-98/hr OD.
+# for 70B+ validation and the DeepSeek/Kimi sweep. Capacity policy: SPOT
+# PREFERRED, on-demand as the explicit last resort (see the requirements note
+# below — this header used to say "spot only", which contradicted the actual
+# values line; the recorded later decision was "progress over waiting").
+# CAVEATS the next revision should address (from the 2026-07-01 review):
+#   * p4d.24xlarge is 8x A100-40G = 320GB VRAM — models >~300GB (Nemotron NVFP4,
+#     Qwen3-VL, DeepSeek-AWQ) OOM-crashloop if Karpenter picks it cheapest-first.
+#     Big-model manifests should pin p5.48xlarge, or this pool should split.
+#   * with p4d dropped, the OD worst case is p5 ~$55-98/hr, not the ~$33/hr p4d
+#     figure the note below was approved against.
 apiVersion: karpenter.sh/v1
 kind: NodePool
 metadata:

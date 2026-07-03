@@ -16,7 +16,9 @@
 #     for vLLM, scores extraction across all tiers + commercial, COLLECTS RAG answers,
 #     ships log+result to S3, and RELEASES the GPU (vllm->0) on exit. The laptop can
 #     disconnect the moment the Job is submitted.
-# Belt: the nightly gpu-off CronJob (global). No per-run timer, no watcher Job.
+# Belts: the nightly gpu-off CronJob (global) + a fresh per-run 12h gpu-deadline Job.
+# The deadline covers the gap the Nemotron idle (~$70) exposed: if the eval Job never
+# submits or wedges, nothing else releases a single-box Deployment until 06:00 UTC.
 #
 # Follow-on passes (separate, documented in docs/ornith-benchmark-runbook.md):
 #   - fixed-judge RAG scoring: swap vllm -> Qwen2.5-VL-72B (vllm-scale.yaml) and score
@@ -30,8 +32,12 @@ ACCT=$(aws sts get-caller-identity --query Account --output text)
 export BUCKET="kelsus-refarch-models-scale-$ACCT"
 st() { bash bench/status.sh set "$1" >/dev/null 2>&1 || true; echo ">> $1"; }
 
-st "ornith: ensure nightly GPU belt is armed"
+st "ornith: ensure nightly GPU belt is armed + fresh 12h per-run deadline"
 kubectl apply -f infra/helm/gpu-nightly-off.yaml >/dev/null 2>&1
+kubectl delete job gpu-deadline --ignore-not-found >/dev/null 2>&1
+# 12h (not the 6h default): reasoning evals at 900-1200s timeouts can legitimately run
+# past 6h; 12h matches the eval Job's own activeDeadlineSeconds. Kill = scale vllm->0.
+sed 's/21600/43200/' infra/helm/gpu-deadline-job.yaml | kubectl apply -f - >/dev/null 2>&1
 
 st "ornith: deploying Ornith-1.0-397B BF16 (qwen3_5_moe, vision+reasoning, TP=8 on 8xH200)"
 kubectl apply -f infra/helm/vllm-ornith.yaml >/dev/null 2>&1

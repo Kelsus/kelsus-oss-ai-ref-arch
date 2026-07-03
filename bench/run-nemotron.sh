@@ -24,8 +24,13 @@ ACCT=$(aws sts get-caller-identity --query Account --output text)
 export BUCKET="kelsus-refarch-models-scale-$ACCT"
 st() { bash bench/status.sh set "$1" >/dev/null 2>&1 || true; echo ">> $1"; }
 
-st "nemotron: ensure nightly GPU belt is armed"
+st "nemotron: ensure nightly GPU belt is armed + fresh 12h per-run deadline"
 kubectl apply -f infra/helm/gpu-nightly-off.yaml >/dev/null 2>&1
+kubectl delete job gpu-deadline --ignore-not-found >/dev/null 2>&1
+# 12h (not the 6h default): reasoning evals at 1200s timeouts can legitimately run past
+# 6h; 12h matches the eval Job's own activeDeadlineSeconds. Kill = scale vllm->0. This
+# closes the exact gap that idled this model's first serve ~5h (~$70).
+sed 's/21600/43200/' infra/helm/gpu-deadline-job.yaml | kubectl apply -f - >/dev/null 2>&1
 
 st "nemotron: deploying Nemotron-3-Ultra-550B NVFP4 (NemotronH hybrid Mamba-MoE, TP=8 on 8xH100)"
 kubectl apply -f infra/helm/vllm-nemotron-ultra.yaml >/dev/null 2>&1

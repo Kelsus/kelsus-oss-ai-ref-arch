@@ -24,6 +24,10 @@ spec:
       enableServiceLinks: false # VLLM_PORT collision (SE-3)
       nodeSelector:
         nvidia.com/gpu.present: "true"
+        # PIN the pool: the generic selector let Karpenter satisfy this 4-GPU judge
+        # on a p5e.48xlarge H200 spot box (~2.5x the L40S price) during the 2026-07-01
+        # judge-v2 validation. This serve belongs on the cheap 4x L40S scale pool.
+        karpenter.sh/nodepool: gpu-scale
       tolerations:
         - key: nvidia.com/gpu
           operator: Exists

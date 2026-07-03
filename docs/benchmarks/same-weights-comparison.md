@@ -1,6 +1,6 @@
 # Same-weights comparison — sovereign self-hosted vs. Bedrock vs. the frontier
 
-**Status: COMPLETE 2026-06-20 — five self-hosted models + all managed (Bedrock + Anthropic): extraction, RAG (fixed-judged), commercial (corrected 5-field gold), and self-hosted throughput + $/M-out all measured. Same-weights calibration holds on every axis — Scout, the exact-weights pair, matches Bedrock on all three. UPDATED 2026-06-22: added the GLM-5 family — GLM-5.2 self-hosted (97.0% extraction / 33.2% RAG) + GLM-5 on Bedrock (96.1% / 30.8%), the newest open flagship and top-of-lineup on extraction (footnote ⁸: a family addition, not a strict same-weights pair). UPDATED 2026-06-27: added Ornith-1.0-397B (deepreinforce-ai), self-hosted only with no Bedrock twin — a 397B vision+reasoning MoE that ties the frontier on medical-degraded extraction (96.3%), lands top-of-cluster on RAG (35.2%), and self-hosts at $1.99/M-out (footnote ⁹). UPDATED 2026-06-29: added Nemotron-3-Ultra-550B-A55B (NVIDIA), self-hosted only — a 560B hybrid Mamba-MoE served NVFP4 on 8×H100 via the Marlin FP4 fallback; clean-digital extraction 96.3%, RAG 36.4% (top-of-cluster), $1.96/M-out (footnote ¹⁰). UPDATED 2026-06-30: added DeepSeek-V4-Pro (1.6T MoE, self-hosted only, footnote ¹¹) AND **corrected a medical-gold bug that had been suppressing every model's medical extraction**: `provider_npi` gold was the provider's Synthea UUID, not a 10-digit NPI (`render_forms.py` used the provider `Id` as a stand-in). All 21 models (11 self-hosted + 10 managed) were re-scored on the fixed gold. **Medical extraction now saturates lineup-wide (97–100% med-deg; the old 84–96% spread was substantially the UUID-as-NPI artifact — a 36-char UUID is hard to OCR on degraded scans, a 10-digit NPI is not). Commercial-degraded (no NPI field) and RAG (gold untouched) are unchanged, so the frontier's ~10-pt premium — now clearly a commercial-degraded-only phenomenon — holds.** Per-tier medical numbers and footnotes ⁵/⁸/⁹/¹⁰ below carry the corrected values; see the 2026-06-30 note in Caveats.**
+**Status: COMPLETE 2026-06-20 — five self-hosted models + all managed (Bedrock + Anthropic): extraction, RAG (fixed-judged), commercial (corrected 5-field gold), and self-hosted throughput + $/M-out all measured. Same-weights calibration holds on every axis — Scout, the exact-weights pair, matches Bedrock on all three. UPDATED 2026-06-22: added the GLM-5 family — GLM-5.2 self-hosted (97.0% extraction / 33.2% RAG) + GLM-5 on Bedrock (96.1% / 30.8%), the newest open flagship and top-of-lineup on extraction (footnote ⁸: a family addition, not a strict same-weights pair). UPDATED 2026-06-27: added Ornith-1.0-397B (deepreinforce-ai), self-hosted only with no Bedrock twin — a 397B vision+reasoning MoE that ties the frontier on medical-degraded extraction (96.3%), lands top-of-cluster on RAG (35.2%), and self-hosts at $1.99/M-out (footnote ⁹). UPDATED 2026-06-29: added Nemotron-3-Ultra-550B-A55B (NVIDIA), self-hosted only — a 560B hybrid Mamba-MoE served NVFP4 on 8×H100 via the Marlin FP4 fallback; clean-digital extraction 96.3%, RAG 36.4% (top-of-cluster), $1.96/M-out (footnote ¹⁰). UPDATED 2026-06-30: added DeepSeek-V4-Pro (1.6T MoE, self-hosted only, footnote ¹¹) AND **corrected a medical-gold bug that had been suppressing every model's medical extraction**: `provider_npi` gold was the provider's Synthea UUID, not a 10-digit NPI (`render_forms.py` used the provider `Id` as a stand-in). All 21 models (11 self-hosted + 10 managed) were re-scored on the fixed gold. **Medical extraction now saturates lineup-wide (97–100% med-deg; the old 84–96% spread was substantially the UUID-as-NPI artifact — a 36-char UUID is hard to OCR on degraded scans, a 10-digit NPI is not). Commercial-degraded (no NPI field) and RAG (gold untouched) are unchanged, so the frontier's ~10-pt premium — now clearly a commercial-degraded-only phenomenon — holds.** Per-tier medical numbers and footnotes ⁵/⁸/⁹/¹⁰ below carry the corrected values; see the 2026-06-30 note in Caveats.** **UPDATED 2026-07-03: RAG re-based on metric v2 — the v1 RAG metric had two defects (a judge that never saw the retrieved context + a gold set with duplicated/ambiguous questions) that deflated every model ~50 points and compressed the lineup into noise. All 23 columns (14 self-hosted + 9 managed) were re-collected (managed now at temperature 0) and re-judged in one pass with a human-validated context-aware judge. The lineup lands 80.1–86.3%, one overlapping cluster; every RAG number below is v2. See 'RAG metric v2' for the correction story; v1 RAG numbers are retired and non-comparable.**
 
 ## What this is
 
@@ -20,31 +20,90 @@ per-tier scoring). RAG is scored by one fixed judge (`Qwen2.5-VL-72B-Instruct`, 
 the same judge as the adopted 6-model baseline, so RAG numbers are directly comparable across all
 of it. Synthetic data only (ADR-0004).
 
+## RAG metric v2 (2026-07-03) — the correction that re-based every RAG number
+
+The v1 RAG numbers published here through 2026-06-30 (the ~23–43% band) were an artifact of the
+metric, not a property of the models. Two defects compounded:
+
+1. **The judge never saw the retrieved context.** The v1 rubric's "does not add unsupported
+   claims" clause made it reject correct answers whose grounded elaboration went beyond the terse
+   reference. EXP-002 (Stage 0, human-anchored) measured this directly: on 50 gold-passage answers a
+   human scored 98% correct, the v1 judge scored 65.2% — 17/50 wrongful rejections, zero in the
+   other direction.
+2. **The v1 gold set could not separate models.** 250 items held only 207 unique questions; 26
+   question texts repeated (up to ×8), 19 with *different* gold answers — a deterministic model is
+   structurally wrong on all-but-one copy — and ~50 questions carried no distinguishing entity at
+   all against a 2,686-document corpus.
+
+**The repair (all committed in-tree):** gold v2 (`rag_gold_v2.json`, n=226) anchors every ambiguous
+question with its source-document title, dedupes, and drops irreconcilable golds (deterministic
+transform, `build_gold_v2.py`); judge v2 sees the retrieved context and permits grounded
+elaboration while still rejecting contradiction and fabrication — validated at **47/47 agreement
+with the human anchor (0 wrongful rejections vs v1's 17)**; the gateway now pins temperature 0 on
+managed providers too (v1 managed columns sampled at provider defaults, a comparability bug); and
+every judged artifact stamps its judge deployment (image, version, timestamp) per SE-22.
+
+**The v2 result — all 23 columns, one judge, one pass, n=226:**
+
+| Self-hosted | RAG v2 [95% CI] | | Managed | RAG v2 [95% CI] |
+|---|--:|---|---|--:|
+| DeepSeek-V3.1 (AWQ) | 86.3% [81.2, 90.2] | | Qwen3-VL-235B (Bedrock) | 85.4% [80.2, 89.4] |
+| Qwen3-VL-235B | 85.0% [79.7, 89.0] | | Sonnet 4.6 (Bedrock) | 83.2% [77.8, 87.5] |
+| Kimi-K2-Instruct | 85.0% [79.7, 89.0] | | Llama-4-Scout (Bedrock) | 83.2% [77.8, 87.5] |
+| Ornith-1.0-397B | 85.0% [79.7, 89.0] | | Opus 4.8 (Bedrock) | 82.7% [77.3, 87.1] |
+| DeepSeek-V3.2 | 84.5% [79.2, 88.6] | | Sonnet 4.6 (Anthropic) | 82.7% [77.3, 87.1] |
+| GLM-5.2 | 84.5% [79.2, 88.6] | | Opus 4.8 (Anthropic) | 81.4% [75.8, 85.9] |
+| GLM-4.7 | 83.6% [78.2, 87.9] | | DeepSeek-V3.2 (Bedrock) | 81.0% [75.4, 85.6] |
+| GLM-4.5-Air | 83.6% [78.2, 87.9] | | GLM-4.7 (Bedrock) | 80.5% [74.9, 85.2] |
+| Nemotron-3-Ultra-550B | 83.2% [77.8, 87.5] | | Kimi-K2.5 (Bedrock) | 80.1% [74.4, 84.8] |
+| Llama-4-Scout | 83.2% [77.8, 87.5] | | GLM-5 (Bedrock) | v2 pending⁺ |
+| Qwen3-235B | 83.2% [77.8, 87.5] | | | |
+| Qwen2.5-VL-72B | 82.7% [77.3, 87.1] | | | |
+| Kimi-K2.5 | 82.3% [76.8, 86.7] | | | |
+| DeepSeek-V4-Pro | 80.1% [74.4, 84.8] | | | |
+
+⁺ GLM-5-Bedrock is a family addition (footnote ⁸) and was not in the v2 managed sweep; it will be
+collected and judged in the next stamped judge session (with an overlap set re-judged to verify
+judge stability across sessions).
+
+**How to read it:** every confidence interval overlaps — this is **one statistical cluster**, and
+per-model ranks within it are noise (do not quote "X beats Y" from this table). Three findings
+survive that framing: (a) the frontier premium on grounded regulatory QA is **zero** — Opus and
+Sonnet sit mid-band on a metric that agrees with human judgment; (b) self-hosted ≥ its Bedrock twin
+in 4 of 5 same-weights pairs (Scout identical at 83.2/83.2), none individually significant, with
+the Opus Bedrock-vs-direct gap (1.3 pts) as the substrate-noise yardstick; (c) the ~15-point
+headroom to 100% is now dominated by retrieval misses, not generation — retrieval recall is the
+next lever (EXP-002's conclusion, confirmed at lineup scale).
+
+v1 RAG artifacts remain in-tree (`bench/quality/<model>.judged.json`) for provenance; v2 artifacts
+are `bench/quality/<model>.v2.judged.json`. The two are **not comparable** — different gold,
+different rubric, different managed sampling.
+
 ## Managed results (Layers B + C) — 2026-06-19
 
-Extraction F1 is per-tier vs gold (deterministic); RAG is the fixed-judge accuracy (n=250).
+Extraction F1 is per-tier vs gold (deterministic); RAG is **metric v2** (n=226, see the v2 section).
 `med-deg` / `com-deg` = scanned-degraded (the hard headline tiers). Latency is per-request,
 end-to-end through the gateway.
 
 | Model | Substrate | med-deg F1 | com-deg F1¹ | RAG² | latency p50 | $/M out³ |
 |---|---|--:|--:|--:|--:|--:|
-| **Opus 4.8** | Bedrock | 99.4% | 93.7% | 32.4% | 4.7 s | $25.00 |
-| **Opus 4.8** | Anthropic direct | 99.7% | 94.0% | 32.8% | 2.8 s | $25.00 |
-| **Sonnet 4.6** | Anthropic direct | 99.5% | 89.3% | 25.2% | 3.6 s | $15.00 |
-| **Sonnet 4.6** | Bedrock | 99.4% | 88.7% | 24.6% | 3.5 s | $15.00 |
-| Qwen3-VL-235B | Bedrock | 97.9% | 83.7% | 30.0% | 2.9 s | $2.66 |
-| Llama-4-Scout | Bedrock | 91.3% | 71.7% | 24.8% | 0.8 s | $0.66 |
-| DeepSeek-V3.2 (text) | Bedrock | — | — | 30.8% | 1.8 s | $1.85 |
-| GLM-4.7 (text) | Bedrock | — | — | 32.8% | 1.3 s | $2.20 |
-| Kimi-K2.5 (text) | Bedrock | — | — | 32.4% | 1.4 s | $3.00 |
-| GLM-5 (text)⁸ | Bedrock | — | — | 30.8% | 2.4 s | $3.20 |
+| **Opus 4.8** | Bedrock | 99.4% | 93.7% | 82.7% | 4.7 s | $25.00 |
+| **Opus 4.8** | Anthropic direct | 99.7% | 94.0% | 81.4% | 2.8 s | $25.00 |
+| **Sonnet 4.6** | Anthropic direct | 99.5% | 89.3% | 82.7% | 3.6 s | $15.00 |
+| **Sonnet 4.6** | Bedrock | 99.4% | 88.7% | 83.2% | 3.5 s | $15.00 |
+| Qwen3-VL-235B | Bedrock | 97.9% | 83.7% | **85.4%** | 2.9 s | $2.66 |
+| Llama-4-Scout | Bedrock | 91.3% | 71.7% | 83.2% | 0.8 s | $0.66 |
+| DeepSeek-V3.2 (text) | Bedrock | — | — | 81.0% | 1.8 s | $1.85 |
+| GLM-4.7 (text) | Bedrock | — | — | 80.5% | 1.3 s | $2.20 |
+| Kimi-K2.5 (text) | Bedrock | — | — | 80.1% | 1.4 s | $3.00 |
+| GLM-5 (text)⁸ | Bedrock | — | — | v2 pending | 2.4 s | $3.20 |
 
 ¹ **com-deg F1 is the corrected 5-field score** (all `*-commfix` re-scores landed 2026-06-19). The
 FATURA gold's `buyer_name` had been corrupted (the "Bill to" label captured as the value for ~45–50%
 of invoices); fixed in `data/fatura/build.py`. Fixing it *raised* com-deg across the board (e.g. Opus
 92.9→93.7, Scout 66.2→71.7) because `buyer_name` now scores ~95–100% instead of as a broken field.
 See Caveats.
-² RAG by the fixed judge; **read the cluster, not the rank** — see Caveats.
+² RAG by the metric-v2 fixed judge (context-aware, human-validated); **read the cluster, not the rank** — see the v2 section.
 ³ Managed list price, $/M **output** (`bench/pricing/managed.yaml`, as-of 2026-06-18). Anthropic from
 the first-party list (Bedrock-Claude assumed same — verify); OSS-on-Bedrock from the AWS Price List
 API (us-west-2, standard on-demand). The self-hosted $/M-out (Layer A) prices on a different basis —
@@ -114,20 +173,20 @@ harness). Ornith-1.0-397B and Nemotron-3-Ultra-550B are the exceptions — self-
 
 | Model | Self-host config | med-deg F1 | com-deg F1 | RAG | $/M out |
 |---|---|--:|--:|--:|--:|
-| Qwen3-VL-235B | FP8, 8×H200 TP=8 | **97.9%** | **83.7%** | 28.8% [23.5, 34.7] | $1.30 (H200)⁷ |
-| Ornith-1.0-397B⁹ | BF16, 8×H200 TP=8 | **99.7%** | 81.0% | 35.2% [29.5, 41.3] | $1.99 (H200)⁷ |
-| Kimi-K2.5 (text) | INT4, 8×H200 TP=8⁶ | — | — | **37.6%** [31.8, 43.7] | $2.18 (H200)⁷ |
-| DeepSeek-V4-Pro (text)¹¹ | FP4+FP8, 8×H200 TP=8 | — | — | **40.0%** [34.1, 46.2] | $11.71 (H200)⁷ ¹¹ |
-| GLM-4.7 (text) | FP8, 8×H100 TP=8 | — | — | 36.8% [31.1, 42.9] | $1.27 (H100)⁷ |
-| GLM-5.2 (text)⁸ | FP8, 8×H200 TP=8 | — | — | 33.2% [27.7, 39.3] | $3.69 (H200)⁷ |
-| DeepSeek-V3.2 (text) | FP8, 8×H200 TP=8⁶ | — | — | **34.8%** [29.2, 40.9] | $3.56 (H200)⁷ |
-| Nemotron-3-Ultra-550B (text)¹⁰ | NVFP4, 8×H100 TP=8 | — | — | 36.4% [30.7, 42.5] | $1.96 (H100)⁷ |
-| Llama-4-Scout | BF16, 8×H100 TP=8 (exact match) | 91.3% | 72.3%⁴ | 25.2% [20.2, 30.9] | $1.01 (H100)⁵ |
+| Qwen3-VL-235B | FP8, 8×H200 TP=8 | **97.9%** | **83.7%** | 85.0% [79.7, 89.0] | $1.30 (H200)⁷ |
+| Ornith-1.0-397B⁹ | BF16, 8×H200 TP=8 | **99.7%** | 81.0% | 85.0% [79.7, 89.0] | $1.99 (H200)⁷ |
+| Kimi-K2.5 (text) | INT4, 8×H200 TP=8⁶ | — | — | 82.3% [76.8, 86.7] | $2.18 (H200)⁷ |
+| DeepSeek-V4-Pro (text)¹¹ | FP4+FP8, 8×H200 TP=8 | — | — | 80.1% [74.4, 84.8] | $11.71 (H200)⁷ ¹¹ |
+| GLM-4.7 (text) | FP8, 8×H100 TP=8 | — | — | 83.6% [78.2, 87.9] | $1.27 (H100)⁷ |
+| GLM-5.2 (text)⁸ | FP8, 8×H200 TP=8 | — | — | 84.5% [79.2, 88.6] | $3.69 (H200)⁷ |
+| DeepSeek-V3.2 (text) | FP8, 8×H200 TP=8⁶ | — | — | 84.5% [79.2, 88.6] | $3.56 (H200)⁷ |
+| Nemotron-3-Ultra-550B (text)¹⁰ | NVFP4, 8×H100 TP=8 | — | — | 83.2% [77.8, 87.5] | $1.96 (H100)⁷ |
+| Llama-4-Scout | BF16, 8×H100 TP=8 (exact match) | 91.3% | 72.3%⁴ | 83.2% [77.8, 87.5] | $1.01 (H100)⁵ |
 
 ⁴ Scout's self-hosted com-deg, re-scored on the corrected 5-field gold (2026-06-20): **72.3%**
 [67.0, 77.1] — matching its Bedrock twin (71.7%) to within noise. Calibration now holds on all three
 axes for the exact-same-weights pair: med-deg **91.3 vs 91.3** (post-NPI-fix, identical), com-deg
-72.3 vs 71.7, RAG 25.2 vs 24.8.
+72.3 vs 71.7, RAG v2 **83.2 vs 83.2** (identical point estimates).
 ⁵ Scout $/M-out from the scale-sweep at peak utilization (8×H100 `p5.48xlarge` spot). Text-model
 clean-digital extraction F1 (their headline tier; vision/degraded not run), **NPI-corrected gold
 2026-06-30**: **Kimi-K2.5 100.0%**, **DeepSeek-V3.2 99.4%**, **DeepSeek-V3.1 99.1%**,

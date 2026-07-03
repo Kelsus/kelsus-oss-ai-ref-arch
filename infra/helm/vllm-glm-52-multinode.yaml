@@ -45,6 +45,11 @@ spec:
         nodeSelector:
           nvidia.com/gpu.present: "true"
           karpenter.sh/nodepool: gpu-h200   # p5e OR p5en (both 8× H200), single-AZ via worker podAffinity
+          # SPOT ONLY for the poller-armed path: the poller gates on the SPOT placement
+          # score, but the nodepool also allows on-demand — without this pin Karpenter can
+          # satisfy an ICE'd arm at ~3-5x price (~$98/hr/node), exactly what the score gate
+          # exists to avoid. Forcing on-demand stays possible: edit this line, not the pool.
+          karpenter.sh/capacity-type: spot
         tolerations:
           - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
         containers:
@@ -129,6 +134,7 @@ spec:
         nodeSelector:
           nvidia.com/gpu.present: "true"
           karpenter.sh/nodepool: gpu-h200
+          karpenter.sh/capacity-type: spot   # match the leader — see the leader-side note
         tolerations:
           - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
         affinity:

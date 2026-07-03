@@ -31,7 +31,7 @@ if [ "${1:-}" = "sync" ]; then
   aws s3 sync "$ROOT/data/gold/claims"               "$B/data/gold/claims" --only-show-errors
   aws s3 sync "$ROOT/data/fatura/output"             "$B/data/fatura/output" --only-show-errors
   aws s3 sync "$ROOT/data/fatura/gold"               "$B/data/fatura/gold" --only-show-errors
-  for f in eval_manifest.jsonl eval_manifest_commercial.jsonl rag_gold.json score.py judge.py; do
+  for f in eval_manifest.jsonl eval_manifest_commercial.jsonl rag_gold.json rag_gold_v2.json score.py judge.py; do
     aws s3 cp "$ROOT/bench/quality/$f" "$B/bench/quality/" --only-show-errors
   done
   aws s3 cp "$ROOT/bench/stats.py" "$B/bench/" --only-show-errors

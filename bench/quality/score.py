@@ -28,7 +28,14 @@ from stats import wilson_ci      # noqa: E402
 GW = os.environ.get("GATEWAY", "http://127.0.0.1:8088")
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 GOLD = os.path.join(ROOT, "data/gold/claims")
-GOLD_RAG = os.path.join(os.path.dirname(__file__), "rag_gold.json")
+# RAG gold: v2 (deduped + entity-anchored; see build_gold_v2.py) is the default.
+# v1 stays in-tree frozen — reproduce v1 numbers with RAG_GOLD_FILE=rag_gold.json.
+_V2 = os.path.join(os.path.dirname(__file__), "rag_gold_v2.json")
+_V1 = os.path.join(os.path.dirname(__file__), "rag_gold.json")
+GOLD_RAG = os.environ.get("RAG_GOLD_FILE") or (_V2 if os.path.exists(_V2) else _V1)
+if GOLD_RAG == _V1 and not os.environ.get("RAG_GOLD_FILE"):
+    print("WARNING: rag_gold_v2.json not found — falling back to the DEFECTIVE v1 set "
+          "(duplicated/ambiguous questions; see build_gold_v2.py)", file=sys.stderr)
 N = int(os.environ.get("N", "0"))
 QN = int(os.environ.get("QN", "0"))
 WORKERS = int(os.environ.get("WORKERS", "16"))
@@ -112,7 +119,8 @@ def _extract_item(item):
     inp = os.path.join(ROOT, item["input"])
     cid = item["claim_id"]
     if not os.path.exists(inp):
-        return None
+        return None                       # data problem (missing input), not a model failure
+    truth = gold_view(json.load(open(os.path.join(GOLD, f"{cid}.json"))))
     try:
         with open(inp, "rb") as fh:
             resp = _post_json(f"{GW}/extract", timeout=EXTRACT_TIMEOUT,
@@ -122,8 +130,14 @@ def _extract_item(item):
     except Exception as e:  # noqa: BLE001
         print(f"  extract error {cid[-6:]}: {e}", file=sys.stderr)
         _err("extract", e)
-        return None
-    truth = gold_view(json.load(open(os.path.join(GOLD, f"{cid}.json"))))
+        # Exhausted retries score ZERO, not dropped. Dropping graded an error-prone
+        # model on only its easy subset — up to 20% silent inflation under the
+        # MIN_COMPLETE gate (2026-07-01 review; e.g. sonnet-bedrock shipped n=248
+        # while every doc said n=250). The miss rows record the failure verbatim.
+        return (item["tier"], [False] * len(FIELDS),
+                [{"claim_id": cid, "tier": item["tier"], "field": f,
+                  "pred": f"<request-failed: {type(e).__name__}>", "gold": truth[f]}
+                 for f in FIELDS])
     row = [match(f, pred.get(f), truth[f]) for f in FIELDS]
     # Diagnostic: keep what the model ACTUALLY returned for every MISSED field
     # (pred vs gold), so a low per-field score is auditable instead of a black box
@@ -160,7 +174,8 @@ def score_extraction():
         items = items[:N]
     with ThreadPoolExecutor(WORKERS) as ex:
         res = [r for r in ex.map(_extract_item, items) if r is not None]
-    STATS["extraction"] = {"attempted": len(items), "completed": len(res)}
+    STATS["extraction"] = {"attempted": len(items), "completed": len(res),
+                           "errors": sum(1 for e in ERRORS if e.startswith("extract:"))}
     by_tier = {}
     mismatches = []
     for tier, row, miss in res:
@@ -195,13 +210,17 @@ def cmatch(field, pred, truth):
         return bool(t) and all(tok in p for tok in t)
     np_ = re.sub(r"[^a-z0-9]", "", str(pred).lower())     # number / dates: normalized contains
     nt = re.sub(r"[^a-z0-9]", "", str(truth).lower())
-    return bool(nt) and (nt in np_ or np_ in nt)
+    # bool(np_) guard: an empty-but-non-null pred ("") passed `np_ in nt` (Python:
+    # "" in anything is True), scoring invoice_number/dates CORRECT for a model that
+    # emitted "" instead of null — free credit on exactly the degraded-commercial
+    # axis the frontier-premium claim rests on (2026-07-01 review).
+    return bool(nt) and bool(np_) and (nt in np_ or np_ in nt)
 
 
 def _commercial_item(item):
     inp = os.path.join(ROOT, item["input"])
     if not os.path.exists(inp):
-        return None
+        return None                       # data problem, not a model failure
     try:
         with open(inp, "rb") as fh:
             resp = _post_json(f"{GW}/extract", timeout=EXTRACT_TIMEOUT,
@@ -212,7 +231,7 @@ def _commercial_item(item):
     except Exception as e:  # noqa: BLE001
         print(f"  commercial error {item['id']}: {e}", file=sys.stderr)
         _err("commercial", e)
-        return None
+        return (item["tier"], [False] * len(COMMERCIAL_FIELDS))  # score zero, not dropped
     truth = json.load(open(os.path.join(COMMERCIAL_GOLD, f"{item['id']}.json")))
     return (item["tier"], [cmatch(f, pred.get(f), truth.get(f)) for f in COMMERCIAL_FIELDS])
 
@@ -237,7 +256,8 @@ def score_commercial():
         items = items[:N]
     with ThreadPoolExecutor(WORKERS) as ex:
         res = [r for r in ex.map(_commercial_item, items) if r is not None]
-    STATS["commercial"] = {"attempted": len(items), "completed": len(res)}
+    STATS["commercial"] = {"attempted": len(items), "completed": len(res),
+                           "errors": sum(1 for e in ERRORS if e.startswith("commercial:"))}
     by_tier = {}
     for tier, row in res:
         by_tier.setdefault(tier, []).append(row)
@@ -256,13 +276,24 @@ def _rag_one(item):
         resp = _post_json(f"{GW}/rag/query", timeout=RAG_TIMEOUT, json={"q": q})
         _perf(resp)
         ans = resp["answer"]
+        # The exact grounding text the candidate saw (gateway PR#69+ echoes it as
+        # _context). The v2 judge requires it — EXP-002 showed judging blind to the
+        # passage wrongly rejects grounded elaboration. Absent on older gateways.
+        ctx = resp.get("_context")
         if RAG_COLLECT:  # store now, judge later with one fixed judge (no confound)
-            return {"question": q, "gold": gold, "answer": ans}
-        return 1 if judge(q, gold, ans)["correct"] else 0
+            return {"question": q, "gold": gold, "answer": ans, "context": ctx,
+                    "sources": [c.get("source") for c in (resp.get("citations") or [])]}
+        return 1 if judge(q, gold, ans, context=ctx)["correct"] else 0
     except Exception as e:  # noqa: BLE001
         print(f"  rag error: {e}", file=sys.stderr)
         _err("rag", e)
-        return None
+        # Failed items are FAILED, not invisible (same policy as _extract_item). In
+        # collect mode the error travels with the item so judge_pass scores it 0
+        # without calling the judge; inline mode scores 0 directly.
+        if RAG_COLLECT:
+            return {"question": q, "gold": gold, "answer": "",
+                    "error": f"{type(e).__name__}: {str(e)[:120]}"}
+        return 0
 
 
 def score_rag():
@@ -272,7 +303,8 @@ def score_rag():
         items = items[:QN]
     with ThreadPoolExecutor(WORKERS) as ex:
         v = [x for x in ex.map(_rag_one, items) if x is not None]
-    STATS["rag"] = {"attempted": len(items), "completed": len(v)}
+    STATS["rag"] = {"attempted": len(items), "completed": len(v),
+                    "errors": sum(1 for e in ERRORS if e.startswith("rag:"))}
     if RAG_COLLECT:
         return {"collected": v, "n": len(v), "judged": False}
     n, correct = len(v), sum(v)
@@ -312,12 +344,16 @@ def main():
         out["rag"] = score_rag()
 
     # Completeness verdict — a section that mostly failed must NOT pass as success
-    # (the n=4 DeepSeek false-"OK"). Record it in the result and flag the run.
+    # (the n=4 DeepSeek false-"OK"). Failed items now score zero instead of being
+    # dropped, so the gate counts drops AND scored-as-zero failures: a mass transport
+    # failure must quarantine the run as INVALID, not publish an authentic-looking 0.
     incomplete = []
     for sec, s in STATS.items():
-        att, comp = s["attempted"], s["completed"]
-        if att >= 10 and comp < MIN_COMPLETE * att:
-            incomplete.append(f"{sec} {comp}/{att}")
+        att, comp, errs = s["attempted"], s["completed"], s.get("errors", 0)
+        ok = comp - errs   # items that actually produced a scoreable answer
+        # integer math: (1 - 0.8) * 250 = 49.999... would flip the exact-20% boundary
+        if att >= 10 and ok * 100 < round(MIN_COMPLETE * 100) * att:
+            incomplete.append(f"{sec} ok={ok}/{att} (errors={errs})")
     out["_stats"] = STATS
     out["_incomplete"] = incomplete
     mp = _managed_perf()

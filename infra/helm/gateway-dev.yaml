@@ -50,6 +50,11 @@ spec:
             # flip this per-model via `kubectl set env deploy/gateway PROVIDER=... BEDROCK_MODEL_ID=...`.
             - { name: PROVIDER, value: "local" }
             - { name: AWS_REGION, value: "us-west-2" }   # scale cluster region; all target Bedrock models live here
+            # SE-24: pin the generation budget AT THE MANIFEST — the code default (400)
+            # truncated reasoning-model answers whenever a redeploy dropped the env (the
+            # uniform-57.5% artifact). 2048 clears reasoning + answer for every current
+            # model; per-run overrides via `kubectl set env deploy/gateway LLM_MAX_TOKENS=...`.
+            - { name: LLM_MAX_TOKENS, value: "2048" }
             # Optional: the gateway runs fine without it (bedrock + local need no key).
             # Jon creates the secret only for the anthropic-direct column:
             #   kubectl create secret generic anthropic-api-key --from-literal=key=...

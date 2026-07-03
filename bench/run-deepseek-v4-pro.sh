@@ -27,8 +27,12 @@ ACCT=$(aws sts get-caller-identity --query Account --output text)
 export BUCKET="kelsus-refarch-models-scale-$ACCT"
 st() { bash bench/status.sh set "$1" >/dev/null 2>&1 || true; echo ">> $1"; }
 
-st "v4-pro: ensure nightly GPU belt is armed"
+st "v4-pro: ensure nightly GPU belt is armed + fresh 12h per-run deadline"
 kubectl apply -f infra/helm/gpu-nightly-off.yaml >/dev/null 2>&1
+kubectl delete job gpu-deadline --ignore-not-found >/dev/null 2>&1
+# 12h (not the 6h default): the 865GB pull + reasoning eval at 1200s timeouts can run
+# past 6h; 12h matches the eval Job's own activeDeadlineSeconds. Kill = scale vllm->0.
+sed 's/21600/43200/' infra/helm/gpu-deadline-job.yaml | kubectl apply -f - >/dev/null 2>&1
 
 st "v4-pro: deploying DeepSeek-V4-Pro FP4+FP8 (DeepseekV4 CSA+HCA reasoning MoE, TP=8 on 8xH200)"
 kubectl apply -f infra/helm/vllm-deepseek-v4-pro.yaml >/dev/null 2>&1

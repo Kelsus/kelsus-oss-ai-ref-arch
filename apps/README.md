@@ -5,10 +5,14 @@ only to the gateway's OpenAI-compatible endpoint, so the underlying model is a
 config swap ([ADR-0002](../docs/decisions/0002-eks-vllm-serving-substrate.md)).
 
 ## gateway/  (Sprint 2)
-FastAPI in front of vLLM + retrieval. Owns the cross-cutting guards:
-- **PII redaction** on ingress/egress (defense in depth even though data is synthetic).
-- **Grounding + schema checks** (refuse answers not supported by retrieved context; validate extraction JSON).
-- Request/latency/token metrics to Prometheus.
+FastAPI in front of vLLM + retrieval. Owns the cross-cutting concerns:
+- **Substrate comparability** — identical prompts, temperature 0, and JSON handling
+  across local vLLM / Bedrock / Anthropic, so benchmark columns differ only in the model.
+- **Grounding by prompt** (answers must cite the retrieved context; the fixed judge scores it).
+- A PII `redact()` utility exists but is NOT applied on the benchmark path (synthetic
+  data; v1 applied it asymmetrically to only the digital-text path, which confounded
+  the vision-vs-text comparison).
+- Token/latency provenance per request in `_meta` (usage, `finish_reason`, effective temperature).
 
 ## claims-intake/  (App 1 — Document Workflow Pilot proof; the Varent rebuild)
 Pipeline: **ingest → extract → classify → route → reconcile → chase** over synthetic

@@ -10,6 +10,17 @@
 # risk). Pause: kubectl patch cronjob glm-poller -p '{"spec":{"suspend":true}}'. Disarm a
 # running serve: kubectl delete lws vllm. Cost backstop: lws-deadman.yaml (lone-leader 15m abort).
 #
+# TERMINAL STATES (the poller suspends ITSELF — without these it re-arms forever, because
+# the dead-man deletes the LWS and the `smoked` stamp dies with it, so the next tick sees
+# "no LWS + score>=7" and pays for another 3h cycle, unbounded):
+#   * SUCCESS latch — smoke captured -> mission complete -> suspend self.
+#   * GIVE-UP latch — 3 arms without ever reaching a successful smoke (crash-looping
+#     bring-ups; each one costs ~3h of 2-node burn before the dead-man fires) -> suspend
+#     self + log ALERT. Arm attempts are counted in the glm.kelsus/arm-count annotation
+#     on this CronJob (it survives LWS deletion, which the smoked stamp does not).
+# Re-enable after either latch: kubectl patch cronjob glm-poller -p '{"spec":{"suspend":false}}'
+# (and clear the counter: kubectl annotate cronjob glm-poller glm.kelsus/arm-count-).
+#
 # A companion WATCHDOG (bottom of this file) guards the poller's OWN liveness — a CronJob can
 # silently stop firing (an accidental suspend, or the controller falling behind on schedules),
 # and this surfaces that instead of letting a dead hunt look like a quiet, working one.
@@ -36,6 +47,9 @@ rules:
   - apiGroups: [""]
     resources: ["services", "pods"]
     verbs: ["get", "list", "create", "patch", "update"]
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "patch"]   # the terminal-state latches: suspend self + count arms (annotate)
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -83,6 +97,11 @@ spec:
                       echo "SMOKE RESPONSE: $OUT"
                       kubectl annotate lws vllm -n default "glm.kelsus/smoked=$(date -u +%FT%TZ)" --overwrite >/dev/null 2>&1 || true
                       echo ">> smoke captured + LWS stamped (glm.kelsus/smoked). Full RAG eval = manual, watched."
+                      # SUCCESS LATCH: mission complete — suspend self so a later dead-man teardown
+                      # (which deletes the LWS *and* its smoked stamp) can't re-trigger an arm loop.
+                      kubectl annotate cronjob glm-poller -n default glm.kelsus/arm-count- >/dev/null 2>&1 || true
+                      kubectl patch cronjob glm-poller -n default -p '{"spec":{"suspend":true}}' >/dev/null 2>&1 \
+                        && echo ">> SUCCESS latch: poller suspended itself (re-enable: suspend:false)"
                     else
                       echo "LWS present (ready=${READY:-no}, smoked=${SMOKED:-no}) — leaving it (dead-man guards cost). idle."
                     fi
@@ -95,7 +114,17 @@ spec:
                     --query 'max_by(SpotPlacementScores, &Score).Score' --output text 2>/dev/null)
                   echo "us-west-2 2-node single-AZ H200 spot score: ${SCORE:-unknown}  (arm threshold: 7)"
                   if [ "${SCORE:-0}" -ge 7 ] 2>/dev/null; then
-                    echo ">> capacity likely — ARMING the GLM-5.2 multi-node serve"
+                    # GIVE-UP LATCH: every arm that never reaches a smoke costs a ~3h dead-man
+                    # cycle of 2-node burn. Three strikes -> stop paying, wait for a human.
+                    ARMS=$(kubectl get cronjob glm-poller -n default -o jsonpath='{.metadata.annotations.glm\.kelsus/arm-count}' 2>/dev/null || true)
+                    ARMS=${ARMS:-0}
+                    if [ "$ARMS" -ge 3 ] 2>/dev/null; then
+                      echo "ALERT: $ARMS arms without a successful smoke — GIVE-UP latch, suspending self"
+                      kubectl patch cronjob glm-poller -n default -p '{"spec":{"suspend":true}}' >/dev/null 2>&1 || true
+                      exit 0
+                    fi
+                    echo ">> capacity likely — ARMING the GLM-5.2 multi-node serve (arm $((ARMS+1))/3)"
+                    kubectl annotate cronjob glm-poller -n default "glm.kelsus/arm-count=$((ARMS+1))" --overwrite >/dev/null 2>&1 || true
                     kubectl apply -f /manifest/lws.yaml
                   else
                     echo "<< below threshold — staying idle (\$0)"

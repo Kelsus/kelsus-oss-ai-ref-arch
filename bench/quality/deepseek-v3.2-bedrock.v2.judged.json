@@ -1,0 +1,21 @@
+{
+  "model": "deepseek-v3.2-bedrock.v2",
+  "accuracy_pct": 81.0,
+  "ci_pct": [
+    75.4,
+    85.6
+  ],
+  "n": 226,
+  "n_collected": 226,
+  "judge_errors": 0,
+  "candidate_errors": 0,
+  "rubric": "v2-context",
+  "source": "s3://kelsus-refarch-models-scale-160605163512/results/quality/managed-deepseek-v3.2-bedrock-20260703T032052Z.json",
+  "judge": {
+    "url": "http://127.0.0.1:18099/v1",
+    "model": "local",
+    "judged_at_utc": "2026-07-03T06:54:28Z",
+    "endpoint_model_id": "local",
+    "vllm_version": "0.23.0"
+  }
+}

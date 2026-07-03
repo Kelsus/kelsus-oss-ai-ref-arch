@@ -1,0 +1,21 @@
+{
+  "model": "qwen2.5-vl-72b.v2",
+  "accuracy_pct": 82.7,
+  "ci_pct": [
+    77.3,
+    87.1
+  ],
+  "n": 226,
+  "n_collected": 226,
+  "judge_errors": 0,
+  "candidate_errors": 0,
+  "rubric": "v2-context",
+  "source": "s3://kelsus-refarch-models-scale-160605163512/results/quality/20260702T202525Z.json",
+  "judge": {
+    "url": "http://127.0.0.1:18099/v1",
+    "model": "local",
+    "judged_at_utc": "2026-07-03T06:54:28Z",
+    "endpoint_model_id": "local",
+    "vllm_version": "0.23.0"
+  }
+}

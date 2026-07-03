@@ -1,0 +1,21 @@
+{
+  "model": "deepseek-v3.2.v2",
+  "accuracy_pct": 84.5,
+  "ci_pct": [
+    79.2,
+    88.6
+  ],
+  "n": 226,
+  "n_collected": 226,
+  "judge_errors": 0,
+  "candidate_errors": 0,
+  "rubric": "v2-context",
+  "source": "s3://kelsus-refarch-models-scale-160605163512/results/quality/20260702T041539Z.json",
+  "judge": {
+    "url": "http://127.0.0.1:18099/v1",
+    "model": "local",
+    "judged_at_utc": "2026-07-03T06:54:28Z",
+    "endpoint_model_id": "local",
+    "vllm_version": "0.23.0"
+  }
+}

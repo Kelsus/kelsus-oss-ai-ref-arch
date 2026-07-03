@@ -23,6 +23,7 @@ if [ "${1:-}" = "sync" ]; then
   aws s3 cp "$ROOT/bench/quality/eval_manifest.jsonl"            "$B/bench/quality/" --only-show-errors
   aws s3 cp "$ROOT/bench/quality/eval_manifest_commercial.jsonl" "$B/bench/quality/" --only-show-errors
   aws s3 cp "$ROOT/bench/quality/rag_gold.json"                  "$B/bench/quality/" --only-show-errors
+  aws s3 cp "$ROOT/bench/quality/rag_gold_v2.json"               "$B/bench/quality/" --only-show-errors
   aws s3 cp "$ROOT/bench/quality/score.py" "$B/bench/quality/" --only-show-errors
   aws s3 cp "$ROOT/bench/quality/judge.py" "$B/bench/quality/" --only-show-errors
   aws s3 cp "$ROOT/bench/stats.py"         "$B/bench/" --only-show-errors
@@ -32,13 +33,23 @@ kubectl get serviceaccount bench >/dev/null 2>&1 || kubectl create serviceaccoun
 kubectl apply -f "$ROOT/infra/helm/bench-rbac.yaml" >/dev/null 2>&1  # SA bench may scale vllm to 0 on finish
 kubectl delete job bench-quality --ignore-not-found >/dev/null 2>&1
 
+# Collect-then-fixed-judge is the DEFAULT. Inline RAG judging uses the CANDIDATE as
+# its own judge (JUDGE_URL points at the same vLLM) — a measured ~9-pt self-judge
+# bias (SE-22). v1 avoided it only by operators remembering RAG_COLLECT=1; now
+# forgetting is safe and confounded numbers require an explicit opt-in.
+RAG_COLLECT="${RAG_COLLECT-1}"   # unset -> 1; explicitly-empty stays empty (inline)
+if [ -z "$RAG_COLLECT" ] && [ "${ALLOW_SELF_JUDGE:-}" != "1" ]; then
+  echo "ERROR: RAG_COLLECT= (inline self-judging) is confounded; set ALLOW_SELF_JUDGE=1 to force." >&2
+  exit 1
+fi
+
 sed -e "s/__BUCKET__/$BUCKET/g" \
     -e "s/__WORKERS__/${WORKERS:-16}/g" \
     -e "s/__EXTRACT_TIMEOUT__/${EXTRACT_TIMEOUT:-300}/g" \
     -e "s/__RAG_TIMEOUT__/${RAG_TIMEOUT:-180}/g" \
     -e "s/__N__/${N:-0}/g" \
     -e "s/__QN__/${QN:-0}/g" \
-    -e "s/__RAG_COLLECT__/${RAG_COLLECT:-}/g" \
+    -e "s/__RAG_COLLECT__/${RAG_COLLECT}/g" \
     -e "s/__TIERS__/${TIERS:-}/g" \
     -e "s/__SKIP_COMMERCIAL__/${SKIP_COMMERCIAL:-}/g" \
     -e "s/__SKIP_EXTRACTION__/${SKIP_EXTRACTION:-}/g" \
